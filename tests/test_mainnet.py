@@ -67,6 +67,26 @@ def test_top_algorithm_skips_uncompiled_and_other_challenges():
         "fast_lane_v6", "a2", 50)
 
 
+def test_find_algorithm_by_name_at_any_adoption():
+    # mutation: sharing top_algorithm's adoption filter refuses an unadopted algorithm
+    def gj(url):
+        if "/get-algorithms?" in url:
+            return {"codes": [{"id": "a9", "details": {"challenge_id": "c002", "name": "mine"},
+                               "block_data": {}}],
+                    "binarys": [{"algorithm_id": "a9", "details": {"compile_success": True}}]}
+        return fake_get_json(url)
+    assert mainnet.find_algorithm("vehicle_routing", "mine", get_json=gj) == ("mine", "a9", 0)
+
+
+def test_find_algorithm_only_finds_compiled_algorithms_of_this_challenge():
+    # mutation: a name from another challenge, or one that never compiled, cannot start a job
+    find = mainnet.find_algorithm
+    assert find("vehicle_routing", "hgs_v1", get_json=fake_get_json) == ("hgs_v1", "a1", 30)
+    assert find("vehicle_routing", "broken", get_json=fake_get_json) is None
+    assert find("vehicle_routing", "other", get_json=fake_get_json) is None
+    assert find("vehicle_routing", "absent", get_json=fake_get_json) is None
+
+
 def test_top_algorithm_none_when_no_adoption():
     # mutation: treating adoption 0 or a missing algo_name as a valid best returns a tuple, not None
     # (both candidates below are compiled and on the right challenge; only the filter rejects them)

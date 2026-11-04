@@ -59,7 +59,7 @@ added budget (`--add-*`): `talos/extend.py::extend` records the extension in
 the job's original budget plus its extensions. `job.json` is not rewritten.
 
 Baseline and candidates are always scored on the same nonces, fuel and hardware class, and
-on the same hyperparameters except in a `--start template` job, so the delta between them
+on the same hyperparameters except in a `--start template` or base algorithm job, so the delta between them
 measures the edit and nothing else. The one shortfall is a candidate that has already failed
 the error ceiling on the C3 or local backend: its job stops, and the nonces it skipped count
 as errors (see [Guards between build and scoring](#guards-between-build-and-scoring)). In a template job the candidates run without
@@ -110,6 +110,26 @@ single-shot mode the first candidate of a chain, and any candidate whose hypothe
 design family that no node on the chain has used, is written as a whole file
 (`talos/loop.py::Loop._whole_file`); other edits are search/replace blocks. Codex agentic is
 refused (`talos/agentic.py::codex_agentic_refused`).
+
+### Base algorithm start
+
+`--base-algorithm NAME` and `--base-dir DIR` set `start` to `base` in `job.json`. The root of every
+chain is then a snapshot of that code in `runs/<job>/base_algorithm/`
+(`talos/base_algorithm.py::read_base_root`), whatever it scores. The baseline stays mainnet's top
+algorithm, so "beats the baseline" means what it means in every other job, but its code is only a
+score to beat: it is not put in prompts or the agentic worktree. Unlike a template start, nothing
+enforces that against codex, so the existing `TALOS_ALLOW_CODEX_AGENTIC` opt-in applies.
+`talos/loop.py::Loop._measure_base` scores the root once before any LLM call, metered and without
+hyperparameters, as a candidate runs, and stores the delta in `state.json` as `base_delta`.
+
+There are two bars. A chain's bar (`talos/loop.py::Loop._chain_bar`) starts at the root's delta, so
+a chain can climb from a root under the baseline; those candidates are `accepted` into the chain
+and reset `runs_since_improvement`. The job's bar (`talos/loop.py::Loop._best_bar`) is the higher
+of the baseline and the root: `base_leads` in `state.json` says which, by
+`talos/scoring.py::clears`. It is then the best's delta. Both bars are strict
+(`talos/scoring.py::Bar`): beating the baseline does not excuse falling short of them, so a
+candidate under the job's bar neither becomes the best nor wins, which also applies to a best that
+held-out nonces rejected. In other jobs a win over the baseline replaces any best.
 
 ### Chains and the accept rule
 

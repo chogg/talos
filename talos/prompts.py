@@ -85,7 +85,9 @@ def _gap_line(prefix: str, gap: dict, baseline_name: str) -> str:
 def gap_block(ctx: PromptContext) -> str:
     """Where the parent and the best node stand against the mainnet baseline."""
     if ctx.parent_gap is not None:
-        parent = _gap_line("Parent", ctx.parent_gap, ctx.baseline_name)
+        prefix = ("Base algorithm, the parent" if ctx.start == "base" and ctx.anchor == 0
+                  else "Parent")
+        parent = _gap_line(prefix, ctx.parent_gap, ctx.baseline_name)
     elif ctx.start == "template":
         parent = "Parent: the empty template (not scored yet)"
     else:
@@ -93,7 +95,7 @@ def gap_block(ctx: PromptContext) -> str:
     best = ("Best so far: none yet" if ctx.best_gap is None
             else _gap_line("Best so far", ctx.best_gap, ctx.baseline_name))
     text = f"{parent}\n{best}"
-    if ctx.start == "template":
+    if ctx.start != "mainnet":
         text += "\nThe baseline's code is not available to you; only its score is."
     return text
 
@@ -149,16 +151,18 @@ def hyperparameters_block(ctx: PromptContext) -> str:
 
 
 def in_tree(start: str, search: str, chains: int) -> bool:
-    """Whether an attempt's parent can be a node that never was the job's best: a template
-    start, annealing or several chains. Otherwise every parent is the baseline or a best."""
-    return start == "template" or search == "anneal" or chains > 1
+    """Whether an attempt's parent can be a node that never was the job's best: a template or
+    base start, annealing or several chains. Otherwise every parent is the baseline or a best."""
+    return start in ("template", "base") or search == "anneal" or chains > 1
 
 
 def parent_label(against: int, start: str, tree: bool) -> str:
-    """The code an attempt was built on: node 0 is the baseline, or the empty template in a
-    template start; any other node is a best, or just a node in a tree."""
+    """The code an attempt was built on: node 0 is the baseline, the empty template in a template
+    start or the base algorithm in a base start; any other node is a best, or just a node in a
+    tree."""
     if against == 0:
-        return "the empty template" if start == "template" else "the baseline"
+        return {"template": "the empty template",
+                "base": "the base algorithm"}.get(start, "the baseline")
     return f"node #{against}" if tree else f"best #{against}"
 
 

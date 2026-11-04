@@ -77,7 +77,7 @@ progress.
    ran on, which is why `talos/modal_app/talos_bench.py::register` pins each function
    to one GPU.
    Both sides also run with identical hyperparameters, except in a `--start template`
-   job (the third asymmetry below): the per-track map is
+   or `--base-algorithm`/`--base-dir` job (the third asymmetry below): the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there
    (`talos/loop.py::Loop._request`, `talos/baseline.py::resolve_baseline`), and
@@ -109,7 +109,11 @@ progress.
    (`talos/loop.py::Loop._candidate_hyperparameters`), because a solver written from the
    empty template is not tuned for the mainnet algorithm's values. The package then ships
    no `hyperparameters.json`. This changes the conditions a template candidate's delta is
-   measured under, and it is a decision of the repo owner (design spec 2026-10-19 §5).
+   measured under, and it is a decision of the repo owner (design spec 2026-10-19 §5). A
+   `--base-algorithm`/`--base-dir` job (`start == "base"`) has the same asymmetry, for the same
+   reason: its candidates and its root run with `None`, the baseline stays mainnet's top
+   algorithm with the mainnet map, and the root is scored once, metered, before any LLM call
+   (`talos/loop.py::Loop._measure_base`).
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see

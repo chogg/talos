@@ -107,8 +107,8 @@ Talos writes no lock file, so compare `last_event_ts` with the current time.
 | `schema_version` | int | `1` |
 | `job_id` | string | the directory name under `runs/` |
 | `iteration` | int | the iteration shown |
-| `parent` | int | the iteration it was built on; `0` is the root (the baseline, or the template) |
-| `parent_label` | string | `baseline`, `template` or `#N` |
+| `parent` | int | the iteration it was built on; `0` is the root (the baseline, the template, or the base algorithm) |
+| `parent_label` | string | `baseline`, `template`, `base` or `#N` |
 | `chain` | int | its annealing chain; `0` for a greedy job |
 | `kind` | string | `best`, `false_positive`, `demoted`, `improved`, `accepted`, `rejected` or `failed` |
 | `outcome` | string | the loop's outcome, e.g. `improved`, `failed:score`, `failed:compile` |

@@ -135,13 +135,16 @@ def _wins(d: BundleDelta, rule: BeatRule) -> bool:
 class Bar:
     """The current best's mean and worst-track deltas against the baseline: what a candidate
     must clear to replace it. With no best it is the baseline against itself, (0.0, 0.0), or
-    minus infinity for both on a template start, whose empty template is never scored."""
+    minus infinity for both on a template start, whose empty template is never scored. A strict
+    bar, in a base job, cannot be passed by beating the baseline alone: a base algorithm can
+    already be far over the baseline, and the search must not fall back from it."""
     mean: float
     worst: float
+    strict: bool = False
 
     @classmethod
-    def of(cls, delta: dict) -> Bar:
-        return cls(delta["mean_rel_delta"], delta["worst_rel_delta"])
+    def of(cls, delta: dict, strict: bool = False) -> Bar:
+        return cls(delta["mean_rel_delta"], delta["worst_rel_delta"], strict)
 
 
 def clears(mean_delta: float, worst_delta: float, bar: Bar, rule: BeatRule) -> bool:
@@ -155,9 +158,12 @@ def improves(d: BundleDelta, bar: Bar, rule: BeatRule) -> bool:
     it beats the baseline, so a confirmed win is always the best, or if it clears the best
     under the error ceiling. beats() alone is not required: that would rule out every stepping
     stone (user decision 2026-09-29). The mean alone is not enough either: a higher mean
-    bought by regressing a track would become the base of every later iteration (issue #32)."""
-    return _wins(d, rule) or (d.error_rate <= rule.error_ceiling
-                              and clears(d.mean_rel_delta, d.worst_rel_delta, bar, rule))
+    bought by regressing a track would become the base of every later iteration (issue #32).
+    Against a strict bar only clearing it counts."""
+    if not bar.strict and _wins(d, rule):
+        return True
+    return (d.error_rate <= rule.error_ceiling
+            and clears(d.mean_rel_delta, d.worst_rel_delta, bar, rule))
 
 
 def worst_track_shortfall(d: BundleDelta, bar: Bar, rule: BeatRule) -> str | None:
@@ -265,7 +271,7 @@ def validation_failure(compiled: bool, metered: list[NonceResult], native: list[
     why not. It must build metered, run out of fuel on no nonce whose native run had budget
     left, give the native quality on every nonce both paths solved within their limits, stay
     under the error ceiling, and still count as improved by the loop's own rule
-    (improves(): it clears the current best, or beats the baseline)."""
+    (improves(): it clears the current best, or beats the baseline unless the bar is strict)."""
     if not compiled:
         return "native_metered_build_mismatch", None
     if fuel_proxy_misses(metered, native):

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from talos.package import _diff
 from talos.state import JobSpec, JobState, JobStore
+from talos.base_algorithm import ROOT_DIR, read_base_root, root_label
 from talos.template_start import read_template_root, root_names
 
 KINDS = ("best", "false_positive", "demoted", "improved", "accepted", "rejected", "failed")
@@ -110,18 +111,24 @@ def report_nodes(spec: JobSpec, state: JobState) -> list[ReportNode]:
 
 def root_location(spec: JobSpec) -> str:
     """Where the root's files are in the run directory, for the truncation notes."""
+    if spec.start == "base":
+        return ROOT_DIR
     return "challenge/template.rs" if spec.start == "template" else "baseline"
 
 
 def run_sources(run_dir: Path, spec: JobSpec, state: JobState) -> Sources:
     """node id -> that node's files, or None when they were not saved. The root is the
-    baseline's files, or the template as mod.rs in a template job; the current best is
+    baseline's files, the template as mod.rs in a template job, or the snapshot in a base job;
+    the current best is
     state.best's files; any other node is what its iteration directory holds of the root's file
     names (edit and compile failures save none)."""
     run_dir = Path(run_dir)
     if spec.start == "template":
         root = read_template_root(run_dir / "challenge", spec.challenge)
         names: list[str] = root_names(spec.challenge)
+    elif spec.start == "base":
+        root = read_base_root(run_dir)
+        names = sorted(root) if root else []
     else:
         root = dict(state.baseline.files) if state.baseline is not None else None
         names = sorted(root) if root else []
@@ -161,7 +168,7 @@ def node_diffs(nodes: list[ReportNode], sources: Sources, spec: JobSpec,
                total: int = 1_000_000, per_node: int = 64_000) -> dict[int, str]:
     """Each node's diff against its parent, or a message saying why there is none. The diffs
     share `total` characters evenly, each capped at `per_node`."""
-    root_label = "template" if spec.start == "template" else "baseline"
+    label = root_label(spec.start)
     raw: dict[int, tuple[str, str | None]] = {}
     for n in nodes:
         mine = sources(n.id)
@@ -172,7 +179,7 @@ def node_diffs(nodes: list[ReportNode], sources: Sources, spec: JobSpec,
         if theirs is None:
             raw[n.id] = ("parent's files not saved", None)
             continue
-        text = _diff(theirs, mine, root_label if n.parent == 0 else f"#{n.parent}")
+        text = _diff(theirs, mine, label if n.parent == 0 else f"#{n.parent}")
         if not text:
             raw[n.id] = ("no change", None)
             continue
@@ -312,7 +319,7 @@ def _tick_label(v: float, step: float) -> str:
 
 
 def _figure(spec: JobSpec, nodes: list[ReportNode], axis: Axis,
-            holdout: dict[int, float]) -> str:
+            holdout: dict[int, float], root_score: float | None = None) -> str:
     max_id = max((n.id for n in nodes), default=1) or 1
 
     def x(i: int) -> float:
@@ -323,7 +330,7 @@ def _figure(spec: JobSpec, nodes: list[ReportNode], axis: Axis,
         return _TOP + (axis.hi - s) / (axis.hi - axis.lo) * (_PLOT_BOTTOM - _TOP)
 
     template = spec.start == "template"
-    pos: dict[int, tuple[float, float]] = {0: (x(0), _STRIP_Y if template else y(0.0))}
+    pos: dict[int, tuple[float, float]] = {0: (x(0), _STRIP_Y if template else y(root_score or 0.0))}
     cuts: dict[int, str | None] = {}
     for n in nodes:
         if n.score is None:
@@ -393,7 +400,7 @@ def _figure(spec: JobSpec, nodes: list[ReportNode], axis: Axis,
         out.append(f'<path class="stepline" d="{d}"/>')
     # the root
     rx, ry = pos[0]
-    label = "template" if template else "baseline"
+    label = root_label(spec.start)
     out.append(f'<g data-root class="root"><circle cx="{rx:.1f}" cy="{ry:.1f}" r="5"/>'
                f'<text x="{rx + 8:.1f}" y="{ry - 8:.1f}">{label}</text></g>')
     # held-out deltas
@@ -451,6 +458,9 @@ def _header(spec: JobSpec, state: JobState, timeline: list[dict],
     from talos.package import _render_budget
 
     r = spec.redacted()
+    start = r["start"]
+    if spec.base_algorithm:
+        start += f" ({spec.base_algorithm['source']} {spec.base_algorithm['name']})"
     eff = effective_budget(spec.budget, state.budget_extensions)
     stamps = [row["ts"] for row in timeline if isinstance(row.get("ts"), (int, float))]
     first, last = (stamps[0], stamps[-1]) if stamps else (None, None)
@@ -488,7 +498,7 @@ def _header(spec: JobSpec, state: JobState, timeline: list[dict],
             ("Elapsed", _duration(None if first is None else last - first)),
             ("Working hours", hours)]
     settings = [("Provider", r["provider"]), ("Model", r["model"]), ("Mode", r["mode"]),
-                ("Search", r["search"]), ("Chains", str(r["chains"])), ("Start", r["start"]),
+                ("Search", r["search"]), ("Chains", str(r["chains"])), ("Start", start),
                 ("Scoring", scoring), ("Track focus", r["track"] or "all tracks"),
                 ("Fuel", str(r["fuel"])), ("Tracks", ", ".join(r["tracks"])),
                 ("Hardware", state.hardware or "default"), ("Budget", budget),
@@ -534,17 +544,18 @@ def _track_tables(spec: JobSpec, state: JobState) -> str:
 
 def _best_diff(spec: JobSpec, state: JobState, sources: Sources) -> str:
     root = sources(0)
-    template = spec.start == "template"
+    label = root_label(spec.start)
     if root is None:
         return "<p>The root's files were not found, so there is no diff.</p>"
-    text = _diff(root, state.best.files, "template" if template else "baseline")
-    where = "diff -u challenge/template.rs best/mod.rs" if template else "diff -u baseline best"
+    text = _diff(root, state.best.files, label)
+    where = ("diff -u challenge/template.rs best/mod.rs" if spec.start == "template"
+             else f"diff -u {root_location(spec)} best")
     # Counted before the cut, so a truncated diff still reports the whole change.
     changed = sum(1 for line in text.splitlines()
                   if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
     text = truncate(text, BEST_DIFF_CAP, f"… truncated ({{n}} more lines); full diff: {where}")
     return (f'<details id="best-diff"><summary>#{state.best.iteration} vs '
-            f'{"template" if template else "baseline"}: {changed} lines added or removed'
+            f'{label}: {changed} lines added or removed'
             f'</summary><pre class="diff">{html.escape(text, quote=False)}</pre></details>')
 
 
@@ -585,7 +596,9 @@ def render_report(spec: JobSpec, state: JobState, timeline: list[dict],
     else:
         nodes = report_nodes(spec, state)
         diffs = node_diffs(nodes, sources, spec)
-        axis = axis_for([n.score for n in nodes if n.score is not None])
+        root_score = state.base_delta["mean_rel_delta"] if state.base_delta else None
+        axis = axis_for([n.score for n in nodes if n.score is not None]
+                        + ([] if root_score is None else [root_score]))
         chains = sorted({n.chain for n in nodes})
         families = sorted({n.family for n in nodes})
         options = ['<option value="kind">outcome</option>']
@@ -597,7 +610,7 @@ def render_report(spec: JobSpec, state: JobState, timeline: list[dict],
                   "</select></label>" if len(options) > 1 else "")
         parts.append(
             f'<section><h2>Search</h2><div class="bar">{toggle}{_legend()}</div>'
-            f'<div class="figwrap"><div class="fig">{_figure(spec, nodes, axis, holdout)}</div>'
+            f'<div class="figwrap"><div class="fig">{_figure(spec, nodes, axis, holdout, root_score)}</div>'
             '<aside id="panel" hidden><button id="p-close" type="button" '
             'aria-label="Close">×</button><h3 id="p-title"></h3><p id="p-desc"></p>'
             '<dl id="p-fields"></dl><pre class="diff" id="p-diff"></pre></aside></div>'

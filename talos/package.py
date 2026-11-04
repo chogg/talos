@@ -15,6 +15,7 @@ from talos.prompts import in_tree, parent_label
 from talos.scoring import (
     NOISE_WORDS, BundleDelta, ScoringError, beats, bundle_delta, focus_sets, noise, select)
 from talos.state import JobSpec, JobState, JobStore
+from talos.base_algorithm import read_base_root
 from talos.template_start import read_template_root
 from talos.types import NonceResult
 
@@ -163,11 +164,36 @@ def _budget_section(spec: JobSpec, state: JobState) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _base_note(spec: JobSpec, state: JobState) -> str:
+    """Where a base job started, once that code has been scored."""
+    base = spec.base_algorithm
+    if base is None or state.base_delta is None:
+        return ""
+    return (f"Started from the {base['source']} algorithm `{base['name']}`, which scored "
+            f"{state.base_delta['mean_rel_delta']:+.3%} against the baseline.\n\n")
+
+
+def _closest_note(spec: JobSpec, state: JobState) -> str:
+    """A base job can climb without reaching the baseline. That code is not a result, but it is
+    the budget's work, so the hand-back says where it is."""
+    if spec.start != "base":
+        return ""
+    kept = [n for n in state.nodes if n.accepted and n.score is not None]
+    if not kept:
+        return ""
+    top = max(kept, key=lambda n: n.score)
+    return (f"The closest candidate was #{top.id}, at {top.score:+.3%} against the baseline. It "
+            f"is not a result, but its code is in `iterations/{top.id:04d}/`.\n\n")
+
+
 def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
     baseline = f" Baseline: mainnet `{state.baseline.name}`." if state.baseline else ""
+    outcome = ("No candidate improved on the base algorithm" if state.base_leads
+               else "No candidate beat the baseline")
     return ("# Talos hand-back\n\n"
-            f"No candidate beat the baseline.{baseline} Status: {state.status}. "
+            f"{outcome}.{baseline} Status: {state.status}. "
             f"Reason: {state.stop_reason}\n\n"
+            + _base_note(spec, state) + _closest_note(spec, state)
             + _budget_section(spec, state) +
             "There is nothing to submit from this job.\n")
 
@@ -219,7 +245,7 @@ def lineage_markdown(spec: JobSpec, state: JobState) -> str:
 def _hyperparameters_section(spec: JobSpec) -> str:
     if spec.hyperparameters is None:
         return ""
-    if spec.start == "template":
+    if spec.start != "mainnet":
         lines = [f"- {t}: " + ("none" if spec.hyperparameters.get(t) is None
                                else f"`{json.dumps(spec.hyperparameters[t], sort_keys=True)}`")
                  for t in spec.tracks]
@@ -268,11 +294,17 @@ def _readme(spec: JobSpec, state: JobState, template_missing: bool = False) -> s
                  "LLM.\n\n")
         if template_missing:
             head += "The template copy was not found, so no diff against it is included.\n\n"
-    uai = ("" if spec.start == "template" else
-           " If the baseline's own README on mainnet "
-           f"(`tig-algorithms/src/{spec.challenge}/{state.baseline.name}/README.md`) lists a "
-           "Unique Algorithm Identifier and this candidate still embodies that method, carry "
-           "it over.")
+    head += _base_note(spec, state)
+    base = spec.base_algorithm
+    # The mainnet code this candidate descends from, whose identifier it may carry.
+    uai = ""
+    if spec.start == "mainnet" or (base and base["source"] == "mainnet"):
+        whose, name = (("the base algorithm", base["name"]) if base
+                       else ("the baseline", state.baseline.name))
+        uai = (f" If {whose}'s own README on mainnet "
+               f"(`tig-algorithms/src/{spec.challenge}/{name}/README.md`) lists a "
+               "Unique Algorithm Identifier and this candidate still embodies that method, carry "
+               "it over.")
     head += ("## Submitting\n\n1. Fill out the template `submission/README.md`: algorithm name, "
              f"copyright, submitter.{uai}\n"
              "2. Copy the contents of `submission/` into "
@@ -357,6 +389,11 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
         if not template_missing:
             (pkg / "diff_vs_template.patch").write_text(
                 _diff(root, state.best.files, "template"), encoding="utf-8", newline="\n")
+    elif spec.start == "base":
+        root = read_base_root(store.run_dir)
+        if root is not None:
+            (pkg / "diff_vs_base.patch").write_text(
+                _diff(root, state.best.files, "base"), encoding="utf-8", newline="\n")
     else:
         (pkg / "diff_vs_baseline.patch").write_text(
             _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")
@@ -370,7 +407,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
                                            encoding="utf-8", newline="\n")
     (pkg / "README.md").write_text(_readme(spec, state, template_missing),
                                    encoding="utf-8", newline="\n")
-    if spec.hyperparameters is not None and spec.start != "template":
+    if spec.hyperparameters is not None and spec.start == "mainnet":
         (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
                                                   encoding="utf-8", newline="\n")
     _write_report_safely(spec, state, store)

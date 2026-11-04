@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from talos import calibration
+from talos.base_algorithm import read_base_root
 from talos.baseline import resolve_baseline
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
 from talos.budget import BudgetExhausted, effective_budget, exhausted
@@ -53,6 +54,10 @@ class Thresholds:
 
 
 class Interrupted(Exception):
+    pass
+
+
+class BaseAlgorithmError(RuntimeError):
     pass
 
 
@@ -199,9 +204,9 @@ class Loop:
         return req
 
     def _candidate_hyperparameters(self) -> dict | None:
-        """What a candidate runs with. A template start writes its own solver, so the mainnet
-        algorithm's hyperparameters mean nothing to it; the baseline keeps them."""
-        return None if self.spec.start == "template" else self.spec.hyperparameters
+        """What a candidate runs with. A template or base start is not the mainnet algorithm, so
+        that algorithm's hyperparameters mean nothing to it; the baseline keeps them."""
+        return self.spec.hyperparameters if self.spec.start == "mainnet" else None
 
     def _timeouts(self, baseline_training) -> dict[str, int] | None:
         if self.t.runtime_ceiling <= 0 or not baseline_training:
@@ -261,6 +266,43 @@ class Loop:
              "holdout": [r.to_dict() for r in rec.holdout]}, indent=1),
             encoding="utf-8", newline="\n")
         self._event("baseline_ready", name=rec.name, adoption=rec.adoption)
+
+    def _measure_base(self) -> None:
+        """A base start's root, scored once before any LLM call and under the candidates'
+        conditions. Metered even in a native job, like every score a best is held to
+        (_validate_and_finish). A base that cannot run ends the job here, not after a budget of
+        edits to code that was never going to score. It stays the root whatever it scores; the
+        rule a candidate replaces the best under (scoring.clears) says whether it or the baseline
+        is the score to beat, so a tie leaves the baseline."""
+        if self.spec.start != "base" or self.state.base_delta is not None:
+            return
+        name = self.spec.base_algorithm["name"]
+        pend = self.state.pending_job
+        # keep a stored job_id: a resumed measurement reattaches
+        self.state.pending_job = pend if pend and pend.get("purpose") == "base" else {
+            "purpose": "base"}
+        self._event("base_measuring", name=name)
+        res = self._bench_evaluate(self._root_files(), "metered", validation=True)
+        self.state.pending_job = None
+        self._save()
+        if not res.compile.ok:
+            raise BaseAlgorithmError(f"base algorithm {name} failed to compile at "
+                                     f"{self.spec.monorepo_ref}.\n{res.compile.output[-4000:]}")
+        try:
+            delta = bundle_delta(select(self.state.baseline.training, self._focus()[0]),
+                                 res.training)
+        except ScoringError as e:
+            raise BaseAlgorithmError(f"base algorithm {name} could not be scored: {e}") from None
+        if delta.error_rate > self.rule.error_ceiling:
+            raise BaseAlgorithmError(f"base algorithm {name} failed on {delta.error_rate:.0%} of "
+                                     "its nonces, without hyperparameters, so it cannot be "
+                                     "compared with the baseline")
+        self.state.base_delta = delta.to_dict()
+        self.state.base_leads = clears(delta.mean_rel_delta, delta.worst_rel_delta, Bar(0.0, 0.0),
+                                       self.rule)
+        self._save()
+        self._event("base_measured", name=name, mean_rel_delta=delta.mean_rel_delta,
+                    worst_rel_delta=delta.worst_rel_delta)
 
     # ── calibration (native scoring) ──────────────────────────────────
 
@@ -383,17 +425,26 @@ class Loop:
 
     def _best_bar(self) -> Bar:
         """What a candidate must clear to become the best (talos/scoring.py::improves). With no
-        best yet that is the baseline against itself on a mainnet start, and minus infinity on a
-        template start, so the first scored candidate becomes the best however far below
-        mainnet it is."""
+        best yet that is the baseline against itself on a mainnet start, the better of the
+        baseline and the base algorithm on a base start, and minus infinity on a template start,
+        so the first scored candidate becomes the best however far below mainnet it is."""
         if self.state.best:
-            return Bar.of(self.state.best.delta)
+            return Bar.of(self.state.best.delta, self._strict())
+        if self.spec.start == "base" and not self.state.base_leads:
+            return Bar(0.0, 0.0, strict=True)
         return self._root_bar()
 
     def _root_bar(self) -> Bar:
         if self.spec.start == "template":
             return Bar(-math.inf, -math.inf)
+        if self.spec.start == "base":
+            return Bar.of(self.state.base_delta, strict=True)
         return Bar(0.0, 0.0)
+
+    def _strict(self) -> bool:
+        """A base job's best is the best of the baseline, the base algorithm and its candidates,
+        so beating the baseline does not excuse falling short of the best."""
+        return self.spec.start == "base"
 
     def _chain_bar(self, chain: Chain) -> Bar:
         """What a candidate must clear to become its chain's best: that node's score and worst
@@ -403,7 +454,7 @@ class Loop:
         node = self._node(chain.best)
         if node is None or node.score is None or not node.tracks:
             return self._best_bar()  # a best kept from before the lineage tree has no Node
-        return Bar(node.score, min(node.tracks.values()))
+        return Bar(node.score, min(node.tracks.values()), self._strict())
 
     # ── lineage tree ──────────────────────────────────────────────────
 
@@ -429,10 +480,19 @@ class Loop:
         reaches no prompt, timeline entry or iteration directory."""
         if self.spec.start == "template":
             return template_root(self.spec.challenge, self.template_rs, self.template_cu)
+        if self.spec.start == "base":
+            root = read_base_root(self.store.run_dir)
+            if root is None:
+                raise BaseAlgorithmError(f"the base algorithm's files are missing from "
+                                         f"{self.store.run_dir}")
+            return root
         return dict(self.state.baseline.files)
 
     def _root_score(self) -> float | None:
-        """The mainnet baseline scores 0 against itself; the empty template is not scored."""
+        """The mainnet baseline scores 0 against itself, a base algorithm its measured delta; the
+        empty template is not scored."""
+        if self.spec.start == "base":
+            return self.state.base_delta["mean_rel_delta"]
         return None if self.spec.start == "template" else 0.0
 
     def _node(self, node_id: int) -> Node | None:
@@ -458,7 +518,11 @@ class Loop:
 
     def _parent_gap(self, parent: int) -> dict | None:
         if parent == ROOT:
-            return None
+            if self.spec.start != "base":
+                return None
+            return {"node": ROOT, "mean": self.state.base_delta["mean_rel_delta"],
+                    "tracks": {t["track"]: t["rel_delta"]
+                               for t in self.state.base_delta["tracks"]}}
         node = self._node(parent)
         if node is not None:
             return {"node": parent, "mean": node.rank_score(), "tracks": node.tracks or {}}
@@ -503,8 +567,9 @@ class Loop:
 
     def _chain_scores_apart(self) -> bool:
         """Whether a chain's best can differ from the job's. With one chain on a mainnet start
-        the chain's best moves only with state.best, as before chains existed."""
-        return self.spec.chains > 1 or self.spec.start == "template"
+        the chain's best moves only with state.best, as before chains existed. A base start's
+        chain climbs from a root that can be under the baseline, before anything is the best."""
+        return self.spec.chains > 1 or self.spec.start in ("template", "base")
 
     def _lineage_fields(self, chain: Chain) -> dict:
         """The lineage part of a new iteration record."""
@@ -740,9 +805,10 @@ class Loop:
             return
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
-        # report "won" with different code in state.best.
-        wins = beats(base_tr, results, self.rule)
+        # report "won" with different code in state.best, so a base job's candidate that beats the
+        # baseline but not the best does not win.
         improved = improves(delta, self._best_bar(), self.rule)
+        wins = improved and beats(base_tr, results, self.rule)
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
@@ -905,7 +971,10 @@ class Loop:
         # loses a chain's move.
         self._add_node(n, record, improved, scored, metered)
         reheated = self._reheat(n)
-        if improved:
+        # A base job climbing towards the baseline is progress before anything is the best: it
+        # must not read as a stall that forces a new strategy on a line of work that is improving.
+        progressed = improved or (self._strict() and self._chain(n).best == n)
+        if progressed:
             self.state.runs_since_improvement = 0
         else:
             self.state.runs_since_improvement += 1
@@ -932,9 +1001,9 @@ class Loop:
             self._event("reheat", **reheated)
         self._event("iteration_done", outcome=record["outcome"],
                     runs_since_improvement=self.state.runs_since_improvement)
-        if not improved and self.state.runs_since_improvement == self.t.distill:
+        if not progressed and self.state.runs_since_improvement == self.t.distill:
             self._distill()
-        if (self.spec.search != "anneal" and not improved
+        if (self.spec.search != "anneal" and not progressed
                 and self.state.runs_since_improvement >= self.t.reset):
             self._event("reset", forced_tag=self._forced_tag())
 
@@ -1019,6 +1088,7 @@ class Loop:
                 # that iteration with its own files, so the backend can reattach to the job
                 # instead of abandoning one C3 is still billing for.
                 self._resume_pending(pending)
+            self._measure_base()
             while self.state.status not in TERMINAL:
                 self._check_budget()
                 self.iterate()

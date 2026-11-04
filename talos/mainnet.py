@@ -86,9 +86,9 @@ def fetch_challenge_info(name: str, get_json=_get_json) -> ChallengeInfo:
     raise MainnetError(f"challenge {name!r} not found on mainnet")
 
 
-def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
-    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm, or
-    None. The id is what a benchmark's precommit names its algorithm by."""
+def _compiled_algorithms(name: str, get_json) -> list[tuple[str, str, int]]:
+    """(algorithm_name, algorithm_id, adoption) of every named, compiled algorithm of a challenge.
+    The id is what a benchmark's precommit names its algorithm by."""
     block_id = _block_id(get_json)
     challenges = get_json(f"{MAINNET_API}/get-challenges?block_id={block_id}")
     algos = get_json(f"{MAINNET_API}/get-algorithms?block_id={block_id}")
@@ -98,7 +98,7 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
         raise MainnetError(f"challenge {name!r} not found on mainnet")
     compiled = {b["algorithm_id"]: bool((b.get("details") or {}).get("compile_success"))
                 for b in algos.get("binarys", [])}
-    best: tuple[str, str, int] | None = None
+    out: list[tuple[str, str, int]] = []
     for algo in algos.get("codes", []):
         details = algo.get("details") or {}
         if details.get("challenge_id") != cid or not compiled.get(algo["id"]):
@@ -107,10 +107,25 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
             adoption = int((algo.get("block_data") or {}).get("adoption") or 0)
         except (TypeError, ValueError):
             adoption = 0
-        algo_name = details.get("name")
-        if adoption > 0 and algo_name and (best is None or adoption > best[2]):
-            best = (algo_name, algo["id"], adoption)
+        if details.get("name"):
+            out.append((details["name"], algo["id"], adoption))
+    return out
+
+
+def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
+    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm, or
+    None."""
+    best: tuple[str, str, int] | None = None
+    for found in _compiled_algorithms(name, get_json):
+        if found[2] > 0 and (best is None or found[2] > best[2]):
+            best = found
     return best
+
+
+def find_algorithm(name: str, algorithm: str, get_json=_get_json) -> tuple[str, str, int] | None:
+    """The compiled algorithm of this name, at any adoption, or None."""
+    return next((found for found in _compiled_algorithms(name, get_json)
+                 if found[0] == algorithm), None)
 
 
 @dataclass(frozen=True)

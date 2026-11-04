@@ -23,6 +23,8 @@ from pathlib import Path
 
 from talos import __version__, extras, image_updates, workspace
 from talos import mainnet as mainnet_api
+from talos.base_algorithm import (read_algorithm_dir, read_base_root, root_problem,
+                                  write_base_root)
 from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
                           exhausted)
 from talos.extend import ADD_FLAGS, BUDGET_FLAGS, ExtensionRefused, extend
@@ -339,6 +341,31 @@ def _mainnet_hyperparameters(api, challenge: str, info) -> tuple[dict | None, di
             {t: th.source() for t, th in found.items()})
 
 
+def _load_base(args, api, challenge: str) -> tuple[dict, dict[str, str]]:
+    """(base_algorithm, root files) for a new `--base-algorithm`/`--base-dir` job. Raises
+    ConfigError for a bad choice and MainnetError when mainnet cannot be read."""
+    if args.base_dir is not None:
+        d = Path(args.base_dir)
+        try:
+            files = read_algorithm_dir(d)
+        except (OSError, UnicodeDecodeError) as e:
+            raise ConfigError(f"cannot read --base-dir {d}: {e}") from None
+        if not files:
+            raise ConfigError(f"no .rs/.cu files under {d}")
+        algorithm = {"source": "local", "name": d.resolve().name, "id": None}
+    else:
+        found = api.find_algorithm(challenge, args.base_algorithm)
+        if found is None:
+            raise ConfigError(f"no compiled algorithm {args.base_algorithm!r} on mainnet for "
+                              f"{challenge}")
+        files = api.fetch_algorithm_files(challenge, found[0])
+        algorithm = {"source": "mainnet", "name": found[0], "id": found[1]}
+    problem = root_problem(challenge, files)
+    if problem:
+        raise ConfigError(problem)
+    return algorithm, files
+
+
 def cmd_setup(args, ask) -> int:
     root = workspace.find_root_for_write()
     print(f"Workspace: {root}"
@@ -496,6 +523,7 @@ def _fake_script(system: str, user: str) -> str:
 
 FAKE_MAINNET = types.SimpleNamespace(
     top_algorithm=lambda ch: ("fake_base", "c003_a000", 1),
+    find_algorithm=lambda ch, name: (name, "c003_a001", 0) if name == "fake_other" else None,
     top_hyperparameters=lambda algorithm_id, tracks, fuel: {
         t: TrackHyperparameters({"fake_boost": 1}, "fake-benchmark", "0xfake", 100.0)
         for t in tracks},
@@ -591,6 +619,11 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = data["message"]
     elif kind == "baseline_ready":
         text = "baseline ready"
+    elif kind == "base_measuring":
+        text = f"scoring base algorithm {data['name']}"
+    elif kind == "base_measured":
+        text = (f"base algorithm {data['name']}: {data['mean_rel_delta']:+.3%} vs baseline, "
+                f"worst track {data['worst_rel_delta']:+.3%}")
     elif kind == "hypothesis":
         tag = f" ({data['strategy_tag']})" if data.get("strategy_tag") else ""
         text = f"trying: {data.get('title', '')}{tag}"
@@ -704,6 +737,10 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         if cu_path is not None and not cu_path.is_file():
             print(f"cannot resume {spec.job_id}: {cu_path} is missing; a GPU template start "
                   "builds its algorithm.cu from it", file=sys.stderr)
+            return 1
+        if spec.start == "base" and read_base_root(store.run_dir) is None:
+            print(f"cannot resume {spec.job_id}: {store.run_dir / 'base_algorithm'} is missing; "
+                  "every iteration builds on those files", file=sys.stderr)
             return 1
         previous = state.status
         # A hard-killed job (left researching, say) resumes without a shift: it was working
@@ -881,6 +918,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
     print(f"\nStatus: {final.status} ({final.stop_reason})")
     if final.best is not None:
         print(f"Best delta vs baseline: {final.best.delta['mean_rel_delta']:+.3%}")
+    elif final.base_leads:
+        print(f"Best delta vs baseline: {final.base_delta['mean_rel_delta']:+.3%} "
+              "(the base algorithm; no candidate improved on it)")
     else:
         print("Best delta vs baseline: n/a (no candidate)")
     llm = _llm_spend_text(spec.provider, spec.model, final.spend.llm_usd, why=True)
@@ -923,7 +963,8 @@ def _new_job_id(root: Path, challenge: str, prefix: str = "") -> str:
 
 def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: int,
                  cfg: Config, budget: Budget, start: str, search: str, chains: int,
-                 scoring: str, hp_line: str, backend: str, root: Path) -> str:
+                 scoring: str, hp_line: str, backend: str, root: Path,
+                 base: dict | None = None) -> str:
     cs = CHALLENGES[challenge]
     warning = status_warning(cs)
     caps = []
@@ -948,6 +989,10 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
         f"  scope:     {scope}, {nonces} nonces per track, fuel {fuel}",
         f"  provider:  {cfg.provider} / {cfg.model}, {cfg.mode} mode",
         f"  search:    start {start}, {search}, {chains} chain(s), scoring {scoring}",
+        *([f"  base:      {base['source']} algorithm {base['name']}; the baseline stays "
+           "mainnet's top algorithm, as a score to beat"] if base else []),
+        *(["             its source goes to your LLM provider and compute backend"]
+          if base and base["source"] == "local" else []),
         f"  {hp_line}",
         f"  budget:    {budget_text}",
         f"  backend:   {backend} - {billing}" if cfg.provider != "fake" else
@@ -1076,6 +1121,10 @@ def _cmd_run(args, ask) -> int:
                 print(f"job {spec.job_id} was started with --{flag} {stored}; start a new job "
                       f"to change {flag}", file=sys.stderr)
                 return 2
+        if args.base_algorithm is not None or args.base_dir is not None:
+            print(f"job {spec.job_id} fixed its starting code at start; start a new job to "
+                  "change it", file=sys.stderr)
+            return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         # A resume keeps the provider it started with, whatever the config says today.
         try:
@@ -1095,7 +1144,15 @@ def _cmd_run(args, ask) -> int:
                   f"not {cfg.provider!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=args.mode)
-    start, search = args.start or "mainnet", args.search or "greedy"
+    if args.base_algorithm is not None and args.base_dir is not None:
+        print("pass either --base-algorithm or --base-dir, not both", file=sys.stderr)
+        return 2
+    has_base = args.base_algorithm is not None or args.base_dir is not None
+    if has_base and args.start is not None:
+        print("--base-algorithm and --base-dir choose the start; do not pass --start with them",
+              file=sys.stderr)
+        return 2
+    start, search = "base" if has_base else args.start or "mainnet", args.search or "greedy"
     chains = 1 if args.chains is None else args.chains
     if chains < 1:
         print(f"--chains must be 1 or more, not {chains}", file=sys.stderr)
@@ -1119,6 +1176,17 @@ def _cmd_run(args, ask) -> int:
         print(f"--start template supports {', '.join(TEMPLATE_START_FILES)} only, not "
               f"{challenge}", file=sys.stderr)
         return 2
+    base = base_files = None
+    if has_base:
+        try:
+            base, base_files = _load_base(args, FAKE_MAINNET if cfg.provider == "fake"
+                                          else mainnet_api, challenge)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        except MainnetError as e:
+            print(f"mainnet unreachable: {e}", file=sys.stderr)
+            return 1
     if args.direction and args.direction_file:
         print("pass either --direction or --direction-file, not both", file=sys.stderr)
         return 2
@@ -1266,11 +1334,13 @@ def _cmd_run(args, ask) -> int:
     else:
         used = sum(1 for v in hyperparameters.values() if v is not None)
         hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
+        if base is not None:
+            hp_line += ", on the baseline only"
     scoring = args.scoring or "native"
     print(_job_summary(job_id=job_id, challenge=challenge, scope=scope, nonces=nonces,
                        fuel=info.max_fuel, cfg=cfg, budget=budget, start=start, search=search,
                        chains=chains, scoring=scoring, hp_line=hp_line,
-                       backend=cfg.backend, root=root))
+                       backend=cfg.backend, root=root, base=base))
     # Nothing below this point has run yet: no image recommendation, no run directory, no bench.
     if not args.yes and not confirm(ask, "Start this job?", True):
         print("Not started.")
@@ -1286,11 +1356,13 @@ def _cmd_run(args, ask) -> int:
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
                    hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
-                   scoring=scoring, start=start, search=search,
+                   scoring=scoring, start=start, base_algorithm=base, search=search,
                    chains=chains,
                    anneal=AnnealSettings().to_dict() if search == "anneal" else None)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
+    if base_files is not None:
+        write_base_root(store.run_dir, base_files)
     if docs is not None:
         docs_dir = store.run_dir / "challenge"
         docs_dir.mkdir()
@@ -1388,8 +1460,7 @@ def cmd_compile(args, ask) -> int:
         print(f"unknown challenge {args.challenge!r}", file=sys.stderr)
         return 2
     d = Path(args.dir)
-    files = ({p.relative_to(d).as_posix(): p.read_text(encoding="utf-8") for p in d.rglob("*")
-              if p.is_file() and p.suffix in (".rs", ".cu")} if d.is_dir() else {})
+    files = read_algorithm_dir(d)
     # An empty file map builds nothing on the far side: refuse here rather than pay for a
     # container that can only report a mystery failure.
     if not files:
@@ -1644,6 +1715,12 @@ def build_parser() -> argparse.ArgumentParser:
     what.add_argument("--start", choices=["mainnet", "template"],
                       help="start from mainnet's top algorithm (the default) or from the empty "
                            "template")
+    what.add_argument("--base-algorithm", metavar="NAME",
+                      help="start from this mainnet algorithm; the baseline to beat stays "
+                           "mainnet's top algorithm")
+    what.add_argument("--base-dir", metavar="DIR",
+                      help="start from the algorithm in this local directory; the baseline to "
+                           "beat stays mainnet's top algorithm")
     what.add_argument("--hyperparameters", choices=["mainnet", "none"],
                       help="per-track hyperparameters from the baseline algorithm's best "
                            "mainnet benchmark (mainnet, the default) or none")

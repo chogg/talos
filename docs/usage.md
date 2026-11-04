@@ -360,13 +360,15 @@ that is not tested.
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--scoring native\|metered` | `native` (the default) scores research candidates with a faster unmetered runner and scores an improvement again on the metered runtime before it can become the best. `metered` scores every candidate with TIG's own `tig-runtime`. See **`--scoring`** below. |
 | `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template, on any challenge. See **`--start`** below. |
+| `--base-algorithm NAME` | Starts from this compiled mainnet algorithm instead. The baseline to beat stays the top-adoption algorithm. Not with `--start` or `--base-dir`. See **`--base-algorithm` and `--base-dir`** below. |
+| `--base-dir DIR` | Starts from the `.rs` and `.cu` files in this local directory instead. The baseline to beat stays the top-adoption algorithm. Not with `--start` or `--base-algorithm`. See **`--base-algorithm` and `--base-dir`** below. |
 | `--search greedy\|anneal` | `greedy` (the default) edits the best candidate so far. `anneal` edits the chain's current candidate and sometimes accepts a worse one so the search can leave a local optimum. The annealing settings (start temperature 0.05, final temperature 0.1 of that, reheat after 5 iterations without a new chain best) are estimates with no measurement behind them. |
 | `--chains N` | Independent search chains (default 1; a value below 1 is refused). Chains take turns: iteration n runs on chain (n-1) mod N, one at a time; running them concurrently comes in a later change. |
 | `--budget-usd N` | LLM spend cap in USD. |
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed, or an `exhausted` job given an `--add-*` flag. Cannot change its mode, track, hyperparameters, nonces, start, search or chains. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed, or an `exhausted` job given an `--add-*` flag. Cannot change its mode, track, hyperparameters, nonces, start, base algorithm, search or chains. |
 | `--add-iterations N` | Adds N to the job's iteration cap. Only with `--resume`; refused for a cap the job was started without. |
 | `--add-hours N` | Adds N to the job's wall-clock cap. Only with `--resume`; refused for a cap the job was started without. |
 | `--add-usd N` | Adds N to the job's LLM spend cap. Only with `--resume`; refused for a cap the job was started without. |
@@ -424,6 +426,37 @@ mainnet start; they cost more on a GPU challenge. `neuralnet_optimizer` has nine
 files, so its prompts are long (ESTIMATE (unverified) ~25k tokens each). Refused with
 `codex-cli` in agentic mode, even with `TALOS_ALLOW_CODEX_AGENTIC=1`. See
 [From-scratch start and annealing search](architecture.md#from-scratch-start-and-annealing-search).
+
+**`--base-algorithm` and `--base-dir`.** The search edits this code, whatever it scores. The
+top-adoption mainnet algorithm is never edited: it is a score to beat. The job's best, and any win,
+must clear the higher of the two scores. A win also needs to beat the mainnet algorithm on held-out
+nonces.
+`--base-dir` needs `mod.rs` at the top of the directory, and a `.cu` file on a GPU challenge; its
+source goes to your LLM provider and compute backend, as a mainnet algorithm's does. The files
+are copied to `runs/<job_id>/base_algorithm/` at job start, so later edits to the directory do not
+affect the job, and a resume refuses a job whose copy is missing.
+
+After the baseline, the job scores the base algorithm once on the training nonces with TIG's
+metered runtime, before any LLM call. If it does not compile, or fails on more nonces than the
+challenge's error ceiling allows, the job ends `failed`.
+
+If the base algorithm beats the baseline, a candidate under it is rejected even if it beats the
+baseline. If no candidate clears it, the base algorithm stays the best and the package has nothing
+to submit.
+
+If the base algorithm does not beat the baseline, including a tie, or a higher mean that regresses
+a track past the challenge's tolerance, the search still works on it. A candidate that improves on
+its chain's best is `accepted` and the next iteration edits it, but nothing is the job's best until
+a candidate beats the baseline. A job that runs out of budget before then has nothing to submit,
+and the package's `README.md` names the closest candidate and where its code is.
+
+The base algorithm and every candidate run without hyperparameters, and the package has no
+`hyperparameters.json`. `--hyperparameters` applies only to the baseline. An algorithm that needs
+hyperparameters to run or to score well will show that in its score against the baseline. The
+package has `diff_vs_base.patch` instead of `diff_vs_baseline.patch`.
+
+Annealing and several chains keep their own rules: an annealing chain can accept a worse candidate
+and a chain edits its own best, but neither can make that candidate the job's best or its win.
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
@@ -533,7 +566,8 @@ talos diff JOB_ID [--iteration N|best] [--against baseline|parent]
 
 Prints the unified diff of one iteration's files to stdout, untruncated. `--iteration`
 defaults to `best`. `--against baseline` (the default) diffs against the root the job started
-from: the mainnet baseline, or the template for a `--start template` job. `--against parent`
+from: the mainnet baseline, the template for a `--start template` job, or the base algorithm for
+a `--base-algorithm` or `--base-dir` job. `--against parent`
 diffs against the iteration it was built on. An empty diff prints nothing.
 
 Exit code 0; 1 with a message on stderr when the job, the iteration or a best candidate does
@@ -608,6 +642,7 @@ Each job gets a directory under `runs/` in the workspace:
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
 | `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown (`template.rs`, plus `template.cu` on a GPU challenge). |
+| `runs/<job_id>/base_algorithm/` | A `--base-algorithm` or `--base-dir` job only: the copy of the code the job started from. |
 | `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |
 | `runs/<job_id>/best/` | The best candidate's files so far. |
 | `runs/<job_id>/package/` | The hand-back package, written when the job stops. |
@@ -618,13 +653,13 @@ The package directory holds:
 | File | Contents |
 |---|---|
 | `submission` | A folder with the candidate to submit: the best algorithm's `.rs` and `.cu` files and TIG's submission `README.md` template, to fill out. Absent when the job produced no candidate. |
-| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. A `--start template` job writes `diff_vs_template.patch` instead, against the empty template. |
+| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. A `--start template` job writes `diff_vs_template.patch` instead, against the empty template, and a `--base-algorithm` or `--base-dir` job writes `diff_vs_base.patch`, against the code it started from. |
 | lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. Under each table's summary it adds `mean_rel_se: ±…  noise: N.Nx (band)` and a `per track:` line; the evidence draft for the TIG submission does not have them. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
 | `report.html` | The search on one page: a plot of every iteration with its lineage (a ±1 standard error whisker on each scored node that has a nonzero standard error under the error ceiling), each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
-| `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
+| `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template`, `--base-algorithm` or `--base-dir` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
 
 Benchmark the submitted algorithm with the same hyperparameters: the measured improvement

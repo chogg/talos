@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from talos.base_algorithm import root_label
 from talos.budget import effective_budget
 from talos.package import _diff, score_pairs
 from talos.report import ReportNode, holdout_points, read_timeline, report_nodes, run_sources
@@ -231,7 +232,7 @@ def resolve_node(run: Run, which: str | int) -> ReportNode:
 
 def _label(run: Run, node_id: int) -> str:
     if node_id == 0:
-        return "template" if run.spec.start == "template" else "baseline"
+        return root_label(run.spec.start)
     return f"#{node_id}"
 
 

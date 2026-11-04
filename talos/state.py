@@ -45,7 +45,10 @@ class JobSpec:
     # cannot be reused with a newer runtime, even when the monorepo pin is unchanged.
     dev_image_tag: str | None = None
     scoring: str = "metered"  # research scoring, `talos run --scoring`; frozen with the job
-    start: str = "mainnet"  # `talos run --start`: "mainnet" baseline or "template" from scratch
+    start: str = "mainnet"  # "mainnet" baseline, "template" from scratch, or "base" (below)
+    # `talos run --base-algorithm/--base-dir`: the code chains start from when start == "base".
+    # Its files are in runs/<job>/base_algorithm/ (talos/base_algorithm.py).
+    base_algorithm: dict | None = None  # {"source": "mainnet" or "local", "name", "id"}
     search: str = "greedy"  # `talos run --search`: "greedy" or "anneal"
     chains: int = 1  # `talos run --chains`: independent annealing chains
     anneal: dict | None = None  # AnnealSettings.to_dict(); None unless search == "anneal"
@@ -161,6 +164,10 @@ class JobState:
     # resumed from, and what it added. job.json keeps the budget the job started with;
     # talos/budget.py::effective_budget adds these to it.
     budget_extensions: list[dict] = field(default_factory=list)
+    # A base start's root against the baseline, metered (Loop._measure_base); None until then.
+    base_delta: dict | None = None
+    # Whether that root beat the baseline, so it and not the baseline is the job's score to beat.
+    base_leads: bool = False
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -180,7 +187,8 @@ class JobState:
                 "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations,
                 "nodes": [n.to_dict() for n in self.nodes],
                 "chains": [c.to_dict() for c in self.chains],
-                "budget_extensions": self.budget_extensions}
+                "budget_extensions": self.budget_extensions, "base_delta": self.base_delta,
+                "base_leads": self.base_leads}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -198,7 +206,8 @@ class JobState:
                    validations=d.get("validations", []),
                    nodes=[Node.from_dict(n) for n in d.get("nodes", [])],
                    chains=[Chain.from_dict(c) for c in d.get("chains", [])],
-                   budget_extensions=d.get("budget_extensions", []))
+                   budget_extensions=d.get("budget_extensions", []),
+                   base_delta=d.get("base_delta"), base_leads=d.get("base_leads", False))
 
 
 def _atomic_write(path: Path, text: str) -> None:
