@@ -19,6 +19,7 @@ from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response, apply_whole_file_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
+from talos.leak_check import describe, hindsight_additions, leak_findings
 from talos.lineage import (ROOT, AnnealSettings, Chain, Node, chain_for, decide, draw,
                            spent_fraction, temperature)
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
@@ -718,11 +719,27 @@ class Loop:
         self._save()
         self._score_candidate(n, ctx, record, hypothesis, files)
 
+    def _leak_rejected(self, n: int, ctx: PromptContext, record: dict,
+                       files: dict[str, str]) -> bool:
+        """Fails the iteration when these files break the causality rule. Before the bench, so it
+        costs no compute. The reason goes in the record, which is how the LLM hears of it."""
+        findings = (leak_findings(self.spec.challenge, files)
+                    + hindsight_additions(self.spec.challenge, ctx.files, files))
+        if not findings:
+            return False
+        problem = describe(findings)
+        self._event("leak_rejected", problem=problem)
+        record.update(outcome="failed:leak", error=problem)
+        self._finish_iteration(n, record, improved=False)
+        return True
+
     def _score_candidate(self, n: int, ctx: PromptContext, record: dict, hypothesis: dict,
                          files: dict[str, str]) -> None:
         """Everything after the LLM has produced files: compile-fix rounds, scoring, confirmation.
         Entered from iterate() and from a resume with a pending job."""
         it_dir = self.store.iteration_dir(n)
+        if self._leak_rejected(n, ctx, record, files):
+            return
         res = self._bench_evaluate(files, self._scoring())
         for _ in range(self.t.compile_fix_rounds):
             dead = self._dead_code(res)
@@ -750,6 +767,8 @@ class Loop:
             if fixed.applied == 0:
                 break  # byte-identical files; re-evaluating them would repeat the same error
             files = fixed.files
+            if self._leak_rejected(n, ctx, record, files):
+                return
             res = self._bench_evaluate(files, self._scoring())
         if not res.compile.ok:
             record.update(outcome="failed:compile")

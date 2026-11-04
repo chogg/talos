@@ -327,3 +327,11 @@ def test_gpu_template_hypothesis_prompt_shows_template_cu():
     assert "algorithm.cu" in system and "CU_MARKER" in system
     system, _ = hypothesis_prompts(ctx(challenge="hypergraph", start="template", is_gpu=True))
     assert "algorithm.cu" not in system and "CU_MARKER" not in system
+
+
+@pytest.mark.parametrize("build", [hypothesis_prompts, lambda c: edit_prompts(
+    c, {"title": "t", "description": "d"})], ids=["hypothesis", "edit"])
+def test_the_causality_rule_is_stated_only_where_it_applies(build):
+    # mutation: not telling the LLM has it spend iterations on candidates the check refuses
+    assert "Causality rule" in build(ctx(challenge="energy_arbitrage"))[0]
+    assert "Causality rule" not in build(ctx())[0]

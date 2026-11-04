@@ -14,7 +14,8 @@ from pathlib import Path
 
 from talos.executables import argv0
 from talos.providers.claude_cli import NO_COST, session_cost
-from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, challenge_block,
+from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, causality_rules,
+                           challenge_block,
                            focus_sentence, gap_block, hyperparameters_block, recall_block,
                            template_cu_block)
 
@@ -114,7 +115,7 @@ fixed fuel budget {scope}).
   "design_family" (a short label, at most 80 characters, for the kind of design this solver is).
   Use the Edit tool; creating new files is not permitted.
 
-The algorithm files are: {", ".join(f"algorithm/{name}" for name in sorted(ctx.files))}.
+{causality_rules(ctx.challenge)}The algorithm files are: {", ".join(f"algorithm/{name}" for name in sorted(ctx.files))}.
 
 Direction from the user:
 {ctx.direction}

@@ -1,11 +1,13 @@
 """The root files of a `talos run --base-algorithm/--base-dir` job: the code every chain starts
 from, snapshotted into the run directory at job start so a resume never reads the source again.
-The baseline stays mainnet's top algorithm. Loop, package and report all read the root here."""
+The baseline stays mainnet's top leak-free algorithm. Loop, package and report all read the root
+here."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from talos.challenges import CHALLENGES
+from talos.leak_check import describe, leak_findings, void_reason
 
 ROOT_DIR = "base_algorithm"
 
@@ -25,6 +27,10 @@ def root_problem(challenge: str, files: dict[str, str]) -> str | None:
         return "the base algorithm has no mod.rs at its top level"
     if CHALLENGES[challenge].is_gpu and not any(name.endswith(".cu") for name in files):
         return f"{challenge} is a GPU challenge: the base algorithm needs a .cu file"
+    findings = leak_findings(challenge, files)
+    if findings:
+        return (f"the base algorithm carries the hidden_seed leak ({describe(findings)}); remove "
+                "it first, because every candidate would inherit it")
     return None
 
 
@@ -42,6 +48,13 @@ def read_base_root(run_dir: Path) -> dict[str, str] | None:
     files = {p.relative_to(root).as_posix(): p.read_bytes().decode("utf-8", errors="replace")
              for p in root.rglob("*") if p.is_file()} if root.is_dir() else {}
     return files or None
+
+
+def job_void_reason(spec, state, run_dir: Path) -> str | None:
+    """`talos/leak_check.py::void_reason` with this job's root read from its run directory. A
+    mainnet start's root is its baseline, which is checked anyway."""
+    root = read_base_root(run_dir) if spec.start == "base" else None
+    return void_reason(spec, state, root)
 
 
 def root_label(start: str) -> str:

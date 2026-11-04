@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from talos.base_algorithm import root_label
+from talos.base_algorithm import job_void_reason, root_label
 from talos.budget import effective_budget
 from talos.package import _diff, score_pairs
 from talos.report import ReportNode, holdout_points, read_timeline, report_nodes, run_sources
@@ -123,7 +123,7 @@ def _llm(spec: JobSpec, llm_usd: float) -> tuple[float | None, bool, str | None]
 
 _ROW_KEYS = ("job_id", "challenge", "provider", "model", "status", "iteration",
              "best_mean_rel_delta", "llm_usd", "llm_priced", "llm_unpriced_reason",
-             "compute_usd", "last_event_ts", "error")
+             "compute_usd", "last_event_ts", "void_reason", "error")
 
 
 def _best_delta(state: JobState) -> float | None:
@@ -159,7 +159,8 @@ def status_rows(runs_root: Path) -> list[dict]:
                    status=state.status, iteration=state.iteration,
                    best_mean_rel_delta=_best_delta(state), llm_usd=llm_usd, llm_priced=priced,
                    llm_unpriced_reason=reason, compute_usd=float(state.spend.compute_usd),
-                   last_event_ts=_last_ts(run.timeline))
+                   last_event_ts=_last_ts(run.timeline),
+                   void_reason=job_void_reason(spec, state, run.run_dir))
         rows.append(row)
     return rows
 
@@ -196,6 +197,7 @@ def job_detail(run: Run, now: float) -> dict:
         "schema_version": SCHEMA_VERSION,
         "job_id": run.job_id,
         "job": spec.redacted(),
+        "void_reason": job_void_reason(spec, state, run.run_dir),
         "status": state.status,
         "stop_reason": state.stop_reason,
         "iteration": state.iteration,
@@ -289,6 +291,7 @@ def iteration_detail(run: Run, which: str | int) -> dict:
         "parent_label": _label(run, node.parent),
         "chain": node.chain,
         "kind": node.kind,
+        "void_reason": job_void_reason(run.spec, run.state, run.run_dir),
         "outcome": node.outcome,
         "error": node.error,
         "hypothesis": {"title": node.title, "description": node.description,
@@ -352,7 +355,8 @@ def format_status_table(rows: list[dict]) -> str:
         if r["error"] is not None:
             body.append([r["job_id"], "-", r["status"], "-", "-", "-", "-", "-"])
             continue
-        body.append([r["job_id"], r["challenge"], r["status"], str(r["iteration"]),
+        status = f"{r['status']} (void)" if r["void_reason"] else r["status"]
+        body.append([r["job_id"], r["challenge"], status, str(r["iteration"]),
                      _pct(r["best_mean_rel_delta"]),
                      _llm_spend_text(r["provider"], r["model"], r["llm_usd"] or 0.0),
                      f"${r['compute_usd']:.2f}", _utc(r["last_event_ts"])])
@@ -383,6 +387,8 @@ def format_job_detail(d: dict) -> str:
              f"status: {d['status']}",
              f"stop reason: {d['stop_reason'] or '-'}",
              f"iteration: {d['iteration']} ({d['runs_since_improvement']} since improvement)"]
+    if d["void_reason"]:
+        lines.append(f"VOID: {d['void_reason']}")
     b = d["best"]
     if b is None:
         lines.append("best: none")
@@ -426,6 +432,8 @@ def format_iteration(d: dict) -> str:
              f"chain: {d['chain']}",
              f"kind: {d['kind']}",
              f"outcome: {d['outcome'] or '-'}"]
+    if d["void_reason"]:
+        lines.append(f"VOID: {d['void_reason']}")
     if d["error"]:
         lines.append(f"error: {d['error']}")
     lines += [f"title: {h['title']}",

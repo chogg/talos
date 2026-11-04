@@ -388,3 +388,38 @@ def test_diff_is_not_truncated(tmp_path):
     big = "".join(f"line {i}\n" for i in range(200_000))
     run = _run(tmp_path, best=1, iteration_files={1: {"mod.rs": big}})
     assert iteration_diff(run, "best", "baseline").count("\n+line ") == 200_000
+
+
+def _void_run(tmp_path):
+    """A knapsack fixture moved onto the challenge the rules cover, with the leak in its best."""
+    make_run(tmp_path / "runs" / "V", [{"iteration": 1}], best=1,
+             iteration_files={1: {"mod.rs": "line a\n"}})
+    run_dir = tmp_path / "runs" / "V"
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec.update(challenge="energy_arbitrage", dev_image_tag="0.0.8")
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    state = json.loads((run_dir / "state.json").read_text())
+    state["best"]["files"] = {"mod.rs": "let v = serde_json::to_value(challenge);\n"}
+    (run_dir / "state.json").write_text(json.dumps(state))
+    return load_run(tmp_path / "runs", "V")
+
+
+def test_a_void_job_says_so_everywhere_it_is_read(tmp_path):
+    # mutation: reporting it only on resume leaves `talos status` showing the score as a result
+    run = _void_run(tmp_path)
+    rows = status_rows(tmp_path / "runs")
+    assert "hidden_seed" in rows[0]["void_reason"]
+    assert "(void)" in format_status_table(rows)
+    detail = job_detail(run, 0.0)
+    assert "hidden_seed" in detail["void_reason"]
+    assert "VOID:" in format_job_detail(detail)
+    shown = iteration_detail(run, "best")
+    assert "hidden_seed" in shown["void_reason"]
+    assert "VOID:" in format_iteration(shown)
+
+
+def test_a_clean_job_has_no_void_marker(tmp_path):
+    # mutation: a marker on every row teaches the reader to ignore it
+    make_run(tmp_path / "runs" / "C", [{"iteration": 1}], best=1)
+    rows = status_rows(tmp_path / "runs")
+    assert rows[0]["void_reason"] is None and "(void)" not in format_status_table(rows)

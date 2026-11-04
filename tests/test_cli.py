@@ -3740,3 +3740,35 @@ def test_event_line_scored_ok_with_a_null_field_has_no_noise(missing):
     assert cli._event_line("scored", data, width=200) == "scored +0.400% vs baseline (" + TAIL
     del data[missing]
     assert cli._event_line("scored", data, width=200) == "scored +0.400% vs baseline (" + TAIL
+
+
+def test_resume_refuses_a_job_carrying_the_leak(tmp_path, monkeypatch, capsys):
+    # mutation: a resume keeps scoring candidates against gridflow, on the same void comparison
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                     "go", "--budget-iterations", "1"]) in (0, 1)
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "paused"
+    state["baseline"]["files"] = {"mod.rs": "let v = serde_json::to_value(challenge);\n"}
+    (run_dir / "state.json").write_text(json.dumps(state))
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **kw: pytest.fail("must not start compute"))
+    assert cli.main(["run", "--resume", run_dir.name]) == 2
+    assert "is void" in capsys.readouterr().err
+
+
+def test_job_summary_says_which_algorithms_are_never_the_baseline(tmp_path, monkeypatch, capsys):
+    # mutation: silently swapping the baseline leaves the user reading its scores as gridflow's
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                     "go", "--budget-iterations", "1"]) in (0, 1)
+    out = capsys.readouterr().out
+    assert "never first_energy, gridflow, super_energy, titan_killer" in out
+    assert "never with mainnet scores" in out
+
+
+def test_leak_rejection_reads_in_the_run_output(capsys):
+    # mutation: no OUTCOME_TEXT entry prints the raw failed:leak
+    assert "causality" in cli.OUTCOME_TEXT["failed:leak"]

@@ -352,3 +352,59 @@ def test_challenge_info_without_fuel_budget_raises():
 
     with pytest.raises(mainnet.MainnetError, match="max_fuel_budget"):
         mainnet.fetch_challenge_info("knapsack", get_json=gj)
+
+
+def _energy_get_json(adoption):
+    """A mainnet with these energy_arbitrage algorithms; GitHub lists each one as a single mod.rs."""
+    def gj(url):
+        if url.endswith("/get-block"):
+            return BLOCK
+        if "/get-challenges?" in url:
+            return {"challenges": [{"id": "c008", "config": {"name": "energy_arbitrage"}}]}
+        if "/get-algorithms?" in url:
+            return {"codes": [{"id": f"id_{n}", "details": {"challenge_id": "c008", "name": n},
+                               "block_data": {"adoption": str(a)}} for n, a in adoption.items()],
+                    "binarys": [{"algorithm_id": f"id_{n}",
+                                 "details": {"compile_success": True}} for n in adoption]}
+        if "api.github.com" in url and "/contents/" in url:
+            name = url.split("?")[0].rsplit("/", 1)[-1]
+            return [{"type": "file", "name": "mod.rs",
+                     "path": f"tig-algorithms/src/energy_arbitrage/{name}/mod.rs"}]
+        raise AssertionError(url)
+    return gj
+
+
+def test_top_algorithm_skips_the_leaking_ones_without_fetching_them():
+    # mutation: taking the top adoption keeps gridflow as the baseline of every energy job
+    fetched = []
+
+    def gt(url):
+        fetched.append(url)
+        return "fn clean() {}"
+    top = mainnet.top_algorithm("energy_arbitrage", get_json=_energy_get_json(
+        {"gridflow": 70, "peakshift": 30, "titan_v9": 0}), get_text=gt)
+    assert top == ("peakshift", "id_peakshift", 30)
+    assert all("gridflow" not in url for url in fetched)
+
+
+def test_top_algorithm_reads_the_source_of_an_unnamed_algorithm():
+    # mutation: trusting KNOWN_LEAKING alone lets a renamed copy of gridflow be the baseline
+    def gt(url):
+        return "let v = serde_json::to_value(challenge);" if "copycat" in url else "fn clean() {}"
+    top = mainnet.top_algorithm("energy_arbitrage", get_json=_energy_get_json(
+        {"copycat": 70, "peakshift": 30}), get_text=gt)
+    assert top == ("peakshift", "id_peakshift", 30)
+
+
+def test_top_algorithm_none_when_every_adopted_one_leaks():
+    # mutation: falling back to the top adoption quietly restores gridflow
+    assert mainnet.top_algorithm("energy_arbitrage", get_json=_energy_get_json({"gridflow": 70}),
+                                 get_text=fake_get_text) is None
+
+
+def test_top_algorithm_fetches_nothing_for_a_challenge_without_rules():
+    # mutation: scanning every challenge spends GitHub's anonymous rate limit for nothing
+    def gt(url):
+        raise AssertionError(url)
+    assert mainnet.top_algorithm("vehicle_routing", get_json=fake_get_json, get_text=gt) == (
+        "fast_lane_v6", "a2", 50)

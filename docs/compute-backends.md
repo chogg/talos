@@ -159,7 +159,9 @@ local backend pulls the same image with `docker pull` the first time a challenge
 The current pin is `0.0.8`, which includes TIG's [seed-obfuscation fix](https://github.com/tig-foundation/tig-monorepo/commit/2703c9af12df835fcf08112722b915e34cd1c035).
 The monorepo pin includes the same fix: compiling against the old energy-arbitrage
 sources would still expose its hidden seed through serialization and debug formatting.
-Keep both pins fixed for a run; a moving `latest` tag would let image contents change
+`talos/inside.py::challenge_problem` reads the checkout's `mod.rs` before every energy_arbitrage
+build and fails the build if the fix is missing. Nothing ties the image tag to a commit, so the
+image's part of that claim is unverified. Keep both pins fixed for a run; a moving `latest` tag would let image contents change
 without invalidating cached artifacts or measurements. An upgrade gets new baseline
 cache keys and local volumes; existing runs with different or unrecorded pins must be
 restarted as new jobs. Redeploy Modal with `talos deploy` and run `talos doctor --full`

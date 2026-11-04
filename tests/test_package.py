@@ -508,3 +508,56 @@ def test_scores_markdown_names_identical_on_every_nonce():
     md = scores_markdown(T4, list(T4), BeatRule())
     assert "noise: identical on every nonce" in md
     assert "no spread" not in md
+
+
+GRIDFLOW = "let v = serde_json::to_value(challenge);\n"
+
+
+def _energy(spec):
+    return replace(spec, challenge="energy_arbitrage", dev_image_tag="0.0.8")
+
+
+def _written(store):
+    return {p.relative_to(store.run_dir / "package").as_posix()
+            for p in (store.run_dir / "package").rglob("*") if p.is_file()}
+
+
+def test_a_void_best_is_never_packaged(tmp_path):
+    # mutation: writing submission/ hands back code that inflates on a build that still leaks
+    spec, st, store = make(tmp_path)
+    spec = _energy(spec)
+    st.best.files = {"mod.rs": GRIDFLOW}
+    pkg = build_package(spec, st, store)
+    assert _written(store) <= {"README.md", "report.html"} and "README.md" in _written(store)
+    text = (pkg / "README.md").read_text()
+    assert "void" in text and "must not be submitted" in text
+    with zipfile.ZipFile(store.run_dir / "package.zip") as z:
+        assert set(z.namelist()) == {"README.md", "report.html"}
+    assert "Void" in (pkg / "report.html").read_text()
+
+
+@pytest.mark.parametrize("change", [{"dev_image_tag": None},
+                                    {"monorepo_ref": "84a5787f5b14a630bdf40f52bccf37887d3d8464"}])
+def test_a_score_from_before_the_fix_is_void_however_clean_the_code(tmp_path, change):
+    # mutation: checking only the source calls an inflated score from the old build a result
+    spec, st, store = make(tmp_path)
+    pkg = build_package(replace(_energy(spec), **change), st, store)
+    assert not (pkg / "submission").exists() and not (pkg / "scores.md").exists()
+
+
+def test_a_clean_energy_package_says_what_its_delta_means(tmp_path):
+    # mutation: dropping the note invites a comparison with leak-inflated mainnet scores
+    spec, st, store = make(tmp_path)
+    pkg = build_package(_energy(spec), st, store)
+    assert (pkg / "submission" / "mod.rs").is_file()
+    for name in ("README.md", "evidence_draft.md"):
+        text = (pkg / name).read_text()
+        assert "Do not compare these scores with mainnet scores" in text, name
+    assert "rebuilt at monorepo `r`" in (pkg / "README.md").read_text()
+
+
+def test_other_challenges_get_no_leak_note(tmp_path):
+    # mutation: an unscoped note warns about a leak knapsack never had
+    spec, st, store = make(tmp_path)
+    pkg = build_package(spec, st, store)
+    assert "hidden_seed" not in (pkg / "README.md").read_text()

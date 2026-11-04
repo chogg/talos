@@ -197,6 +197,19 @@ progress.
    user's own, and `talos run` neither asks for nor defaults a compute cap
    there (`talos/cli.py::cmd_run`).
 
+8. **An energy_arbitrage score counts only from the fixed challenge, against a leak-free
+   baseline, from leak-free code.** Before TIG commit 2703c9af, `hidden_seed` was serialised,
+   and it fixes every future real-time price. An action at a step must not depend on it or on any
+   real-time price after that step. `talos/leak_check.py::leak_findings` is checked on the
+   baseline (`talos/mainnet.py::top_algorithm`, `talos/baseline.py::resolve_baseline`), the root
+   (`talos/base_algorithm.py::root_problem`) and each candidate
+   (`talos/loop.py::Loop._leak_rejected`), and `talos/inside.py::challenge_problem` on the
+   checkout before each build. A job with a `talos/leak_check.py::void_reason` cannot be resumed and
+   packages no submission (`talos/package.py::build_package`). Compare only with algorithms rebuilt
+   at the pin on the same nonces, never with mainnet scores of the leaking algorithms. The checks
+   are static and do not prove causality: see `docs/architecture.md#the-energy_arbitrage-price-leak`
+   for what they cannot see. Tested in `tests/test_leak_check.py`.
+
 ## What "done" means
 
 Run from the repo root:
@@ -219,6 +232,8 @@ Do not decide these yourself. Raise them and stop.
 
 - Changing `MONOREPO_REF` or `DEV_IMAGE_TAG` in `talos/challenges.py`. It
   redefines every cached baseline and needs a redeploy and a live smoke test.
+- Changing `talos/leak_check.py::KNOWN_LEAKING` or the rules in `talos/leak_check.py`, or
+  letting a flagged algorithm back in as a baseline or a root. That decides which scores count.
 - Changing a challenge's `BeatRule` (margin, track tolerance, error ceiling)
   or its hardware class. That redefines what "beats the baseline" meant for
   every package already handed back.
@@ -281,6 +296,7 @@ nobody.
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `docs/usage.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
+| The energy_arbitrage price leak: source checks, void jobs | `talos/leak_check.py::leak_findings`, `talos/leak_check.py::void_reason`, `docs/architecture.md#the-energy_arbitrage-price-leak` |
 | Modal app: image, compile and score functions | `talos/modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
 | Stale-deploy check before spend; `talos deploy` | `talos/deploy_digest.py`, `talos/bench.py::ModalBench.check_deploy`, `talos/cli.py::cmd_deploy` |

@@ -472,3 +472,45 @@ def test_resume_refuses_a_new_base_and_a_missing_snapshot(tmp_path, monkeypatch,
     (run_dir / "base_algorithm" / "mod.rs").unlink()
     assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 1
     assert "base_algorithm is missing" in capsys.readouterr().err
+
+
+LEAK = "fn solve() { let k = 1; let v = serde_json::to_value(challenge); }\n"
+
+
+def test_root_problem_refuses_leak_code_only_on_its_challenge():
+    # mutation: dropping the scan lets every candidate inherit the leak and ship it
+    assert "hidden_seed" in root_problem("energy_arbitrage", {"mod.rs": LEAK})
+    assert root_problem("knapsack", {"mod.rs": LEAK}) is None
+    assert root_problem("energy_arbitrage", {"mod.rs": "fn solve() { let k = 1; }\n"}) is None
+
+
+def test_base_dir_with_the_leak_is_refused_before_the_job_exists(tmp_path, monkeypatch, capsys):
+    # mutation: the check after write_spec leaves a run directory for a job that cannot run
+    monkeypatch.chdir(tmp_path)
+    d = _local_dir(tmp_path)
+    (d / "mod.rs").write_text(LEAK)
+    assert _run("--base-dir", str(d), challenge="energy_arbitrage") != 0
+    assert "hidden_seed" in capsys.readouterr().err
+    assert not list((tmp_path / "runs").glob("*/job.json"))
+
+
+def test_base_algorithm_known_to_leak_is_refused_by_name(tmp_path, monkeypatch, capsys):
+    # mutation: only scanning would fetch it first, and spend the anonymous GitHub rate limit
+    monkeypatch.chdir(tmp_path)
+    assert _run("--base-algorithm", "gridflow", challenge="energy_arbitrage") != 0
+    assert "hidden_seed" in capsys.readouterr().err
+    assert not list((tmp_path / "runs").glob("*/job.json"))
+
+
+def test_a_copy_with_the_leak_removed_can_be_a_root(tmp_path, monkeypatch, capsys):
+    # mutation: refusing by directory name stops the honest fork this route exists for
+    # mutation: the leak line between `base:` and its continuation misattributes the source warning
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "gridflow"
+    d.mkdir()
+    (d / "mod.rs").write_text("fn solve() { let k = 2; }\n")
+    assert _run("--base-dir", str(d), challenge="energy_arbitrage", iterations="1") in (0, 1)
+    assert list((tmp_path / "runs").glob("*/job.json"))
+    lines = capsys.readouterr().out.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith("  base:"))
+    assert "its source goes to your LLM provider" in lines[at + 1]

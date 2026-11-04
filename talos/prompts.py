@@ -8,6 +8,7 @@ from functools import lru_cache
 from importlib import resources
 
 from talos.diagnostics import relevant
+from talos.leak_check import RULES
 
 STRATEGY_TAGS = ["construction", "local_search", "metaheuristic", "constraint_relaxation",
                  "decomposition", "hybrid", "data_structure", "parameter_tuning"]
@@ -39,6 +40,12 @@ unchanged; touch only the algorithm files shown."""
 @lru_cache(maxsize=1)
 def _rust_rules() -> str:
     return resources.files("talos.data").joinpath("rust_rules.md").read_text(encoding="utf-8")
+
+
+def causality_rules(challenge: str) -> str:
+    """What this challenge's source check rejects, so the LLM is told before it is refused."""
+    rules = RULES.get(challenge)
+    return f"{rules}\n\n" if rules else ""
 
 
 @dataclass
@@ -220,6 +227,7 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
         f"{scope}.\n\n{focus}"
         f"The solver must keep this contract (template.rs):\n```rust\n{ctx.template_rs}\n```\n\n"
         f"{template_cu_block(ctx)}"
+        f"{causality_rules(ctx.challenge)}"
         f"Propose ONE specific change. Reply with a JSON object with keys \"title\" "
         f"(short), \"description\" (what to change and why it should raise quality), "
         f"\"design_family\" (a short name for the overall approach, such as "
@@ -249,6 +257,7 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
 def edit_prompts(ctx: PromptContext, hypothesis: dict) -> tuple[str, str]:
     system = (
         f"You are editing a Rust solver for the TIG challenge \"{ctx.challenge}\".\n\n"
+        f"{causality_rules(ctx.challenge)}"
         f"{WHOLE_FILE_FORMAT if ctx.whole_file else SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}"
     )
     challenge = challenge_block(ctx)

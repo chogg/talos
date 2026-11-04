@@ -15,7 +15,8 @@ from talos.prompts import in_tree, parent_label
 from talos.scoring import (
     NOISE_WORDS, BundleDelta, ScoringError, beats, bundle_delta, focus_sets, noise, select)
 from talos.state import JobSpec, JobState, JobStore
-from talos.base_algorithm import read_base_root
+from talos.base_algorithm import job_void_reason, read_base_root
+from talos.leak_check import KNOWN_LEAKING
 from talos.template_start import read_template_root
 from talos.types import NonceResult
 
@@ -137,7 +138,8 @@ def evidence_draft(spec: JobSpec, state: JobState) -> str:
         focus = f" Optimised for track {spec.track}." if spec.track else ""
         bench = ("\n\n## TALOS BENCHMARK APPENDIX (auto-generated)\n\n"
                  f"Baseline: mainnet `{state.baseline.name}` at monorepo `{spec.monorepo_ref}`, "
-                 f"fuel {spec.fuel}, tracks {', '.join(spec.tracks)}.{focus}\n")
+                 f"fuel {spec.fuel}, tracks {', '.join(spec.tracks)}.{focus}\n\n"
+                 f"{_comparison_note(spec, state)}")
         for heading, table in scores_sections(spec, state):
             bench += f"\n### {heading}\n\n{table}"
     return filled + bench
@@ -186,6 +188,23 @@ def _closest_note(spec: JobSpec, state: JobState) -> str:
             f"is not a result, but its code is in `iterations/{top.id:04d}/`.\n\n")
 
 
+def _comparison_note(spec: JobSpec, state: JobState) -> str:
+    """Scores from a challenge whose mainnet rankings a leak has distorted mean one thing only."""
+    if spec.challenge not in KNOWN_LEAKING or state.baseline is None:
+        return ""
+    return (f"Every delta here is against `{state.baseline.name}` rebuilt at monorepo "
+            f"`{spec.monorepo_ref}` on the same nonces. Do not compare these scores with mainnet "
+            "scores: mainnet may still allow the hidden_seed leak.\n\n")
+
+
+def _readme_void(state: JobState, void: str) -> str:
+    return ("# Talos hand-back\n\n"
+            f"This job is void: {void}. Its best candidate, from iteration "
+            f"{state.best.iteration}, must not be submitted, and its scores are not results. "
+            "`report.html` is kept to show what happened.\n\n"
+            "There is nothing to submit from this job. Start a new one.\n")
+
+
 def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
     baseline = f" Baseline: mainnet `{state.baseline.name}`." if state.baseline else ""
     outcome = ("No candidate improved on the base algorithm" if state.base_leads
@@ -194,7 +213,7 @@ def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
             f"{outcome}.{baseline} Status: {state.status}. "
             f"Reason: {state.stop_reason}\n\n"
             + _base_note(spec, state) + _closest_note(spec, state)
-            + _budget_section(spec, state) +
+            + _comparison_note(spec, state) + _budget_section(spec, state) +
             "There is nothing to submit from this job.\n")
 
 
@@ -294,7 +313,7 @@ def _readme(spec: JobSpec, state: JobState, template_missing: bool = False) -> s
                  "LLM.\n\n")
         if template_missing:
             head += "The template copy was not found, so no diff against it is included.\n\n"
-    head += _base_note(spec, state)
+    head += _base_note(spec, state) + _comparison_note(spec, state)
     base = spec.base_algorithm
     # The mainnet code this candidate descends from, whose identifier it may carry.
     uai = ""
@@ -378,6 +397,12 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if state.baseline is None:
         (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n",
                                        encoding="utf-8", newline="\n")
+        _write_report_safely(spec, state, store)
+        shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
+        return pkg
+    void = job_void_reason(spec, state, store.run_dir)
+    if void:
+        (pkg / "README.md").write_text(_readme_void(state, void), encoding="utf-8", newline="\n")
         _write_report_safely(spec, state, store)
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg

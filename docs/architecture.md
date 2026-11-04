@@ -316,6 +316,43 @@ nonces that ran. Only research candidates stop early (`EvalRequest.stop_at_error
 nonce, because their rows are used nonce by nonce afterwards. Modal ignores the flag, since
 all of a call's batches run at once.
 
+## The energy_arbitrage price leak
+
+Before TIG commit 2703c9af, `Challenge` serialised its private `hidden_seed`, and that seed fixes
+every future real-time price. first_energy, super_energy, titan_killer and gridflow read it. Built
+at the pin that code reads nothing, but it still inflates on an older build, so a package carrying
+it could inflate on mainnet. An action at a step must not depend on `hidden_seed` or on any
+real-time price after that step. `talos/leak_check.py` holds the source checks, and they are
+applied at every point code enters a job:
+
+| Where | What happens |
+|---|---|
+| Baseline choice, `talos/mainnet.py::top_algorithm` | Walks adopted algorithms by adoption and skips flagged ones. Adoption is itself likely influenced by the leak, so the top one is not necessarily the baseline here. |
+| Baseline files, `talos/baseline.py::resolve_baseline` | Scans them after a fetch and on a cache hit, because the branch they come from can move. A finding stops the job. |
+| Root, `talos/base_algorithm.py::root_problem` | Refuses a leaking `--base-algorithm` or `--base-dir` before the job exists. A local copy with the leak removed passes. There is no override. |
+| Candidate, `talos/loop.py::Loop._leak_rejected` | Before any compute, and again after each compile fix: `failed:leak`, with the reason returned to the LLM. |
+| Challenge source, `talos/inside.py::challenge_problem` | Fails the build if the checkout's `Challenge` can still expose the seed. |
+| Hand-back, `talos/package.py::build_package` | A void job gets no submission, scores, evidence draft or hyperparameters. |
+| Resume, status, show, report | `talos/leak_check.py::void_reason` refuses the resume and labels the rest. |
+
+`leak_findings` matches how a route is reached, not what a function is called: peakshift keeps a
+stubbed `exact_price_table`, and sampling scenarios with `generate_rt_prices` from the public
+`challenge.seed` is honest. Over all 57 published energy_arbitrage algorithms it flags exactly the
+four above (MEASURED 2026-11-04).
+
+The fix leaves a route open that no seed fix closes. Prices do not depend on actions and the
+verifier accepts any feasible schedule, so an algorithm can record prices during `grid_optimize`
+and then save a schedule rewritten with hindsight. `hindsight_additions` rejects a schedule write
+the candidate's parent does not have. It is measured against the parent because peakshift has
+inactive ones, so **it cannot see a candidate switching one of those on**: track 3's sits behind
+its `None` stub and track 4's behind `use_temporal_flow_postpass`, which is off. Only the prompt
+rule covers that. A static scan shows the absence of these routes, not that code is causal; a
+runtime check of causality does not exist yet.
+
+Compare only against algorithms rebuilt at the pin, on the same nonces, and never against mainnet
+scores of the leaking algorithms. No decision reads a mainnet score; mainnet quality only ranks
+the chosen baseline's hyperparameters, and the package README quotes it.
+
 ## The agentic sandbox
 
 `--mode agentic` hands each iteration to a headless `claude` or `codex` session in a

@@ -167,6 +167,12 @@ copyright, submitter), then copy the folder's contents into
 `runs/<job_id>/package/README.md` lists the steps. `evidence_draft.md` in the same directory
 is a partly filled-in advance-evidence template. You submit it yourself; Talos does not.
 
+On `energy_arbitrage`, a job whose scores are void because of the `hidden_seed` leak writes no
+submission, whatever its status: see
+[the leak](architecture.md#the-energy_arbitrage-price-leak). `talos status` marks such a job
+`(void)` and says why, and `talos run --resume` refuses it. Compare a job's scores only with
+algorithms rebuilt at the same pin on the same nonces, never with mainnet scores.
+
 A job that ends any other way still writes a package with its best candidate in
 `runs/<job_id>/package/submission/`, but that candidate has not beaten the baseline on
 held-out nonces, and the package README says so. The last line of the run's output says the
@@ -426,6 +432,14 @@ mainnet start; they cost more on a GPU challenge. `neuralnet_optimizer` has nine
 files, so its prompts are long (ESTIMATE (unverified) ~25k tokens each). Refused with
 `codex-cli` in agentic mode, even with `TALOS_ALLOW_CODEX_AGENTIC=1`. See
 [From-scratch start and annealing search](architecture.md#from-scratch-start-and-annealing-search).
+
+**`energy_arbitrage` and the `hidden_seed` leak.** first_energy, super_energy, titan_killer and
+gridflow read a seed that fixes every future real-time price, so they are never the baseline or a
+root. The baseline is the highest-adoption algorithm free of the leak, which is not necessarily
+mainnet's top algorithm. `--base-algorithm` and `--base-dir` refuse code that carries it; a local
+copy with it removed is accepted. A candidate that adds it, or that rewrites the schedule after
+`grid_optimize`, fails its iteration as `failed:leak` and spends no compute. See
+[the leak](architecture.md#the-energy_arbitrage-price-leak) for what these checks cannot see.
 
 **`--base-algorithm` and `--base-dir`.** The search edits this code, whatever it scores. The
 top-adoption mainnet algorithm is never edited: it is a score to beat. The job's best, and any win,

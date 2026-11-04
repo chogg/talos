@@ -24,7 +24,8 @@ and follow it."
 
 ## How it works
 
-`talos run` measures the current top-adoption mainnet algorithm once as the baseline. Then,
+`talos run` measures the current top-adoption mainnet algorithm once as the baseline (on
+`energy_arbitrage`, the top one free of the `hidden_seed` leak). Then,
 until the budget runs out, it asks the LLM for an edit, compiles it on the compute backend,
 and scores it on training nonces. A candidate that beats the baseline on training is scored
 again on held-out nonces, and wins only if it still beats the baseline there. Baseline and

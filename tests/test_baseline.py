@@ -264,3 +264,47 @@ def test_cache_key_covers_the_crate_layout(monkeypatch):
     before = cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192")
     monkeypatch.setattr(inside, "CRATE_LAYOUT", "other-layout")
     assert cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192") != before
+
+
+LEAK = "let v = serde_json::to_value(challenge);\n"
+
+
+def _leaky_mainnet(name="copycat"):
+    return types.SimpleNamespace(top_algorithm=lambda ch, **kw: (name, "id", 1),
+                                 fetch_algorithm_files=lambda ch, name, **kw: {"mod.rs": LEAK},
+                                 fetch_template=lambda ch, **kw: "pub fn solve_challenge(")
+
+
+def test_a_baseline_fetched_with_the_leak_stops_before_any_compute(tmp_path):
+    # mutation: checking only at selection misses a branch that moved after job start
+    fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
+    with pytest.raises(BaselineError, match="hidden_seed"):
+        resolve_baseline("energy_arbitrage", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=_leaky_mainnet())
+    assert fb.calls == []
+
+
+def test_a_cached_baseline_with_the_leak_is_refused(tmp_path):
+    # mutation: returning a cache hit unread trusts a measurement of leaking code
+    fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
+    resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", rule=BeatRule(),
+                     mainnet=_leaky_mainnet())  # the same files, measured where no rule applies
+    src = next((tmp_path / "knapsack").glob("*.json"))
+    key = cache_key("energy_arbitrage", MONOREPO_REF, "copycat", TR, HO, 5, "cpu4-mem8192")
+    (tmp_path / "energy_arbitrage").mkdir()
+    (tmp_path / "energy_arbitrage" / f"{key}.json").write_text(src.read_text())
+    with pytest.raises(BaselineError, match="hidden_seed"):
+        resolve_baseline("energy_arbitrage", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=_leaky_mainnet())
+
+
+def test_a_job_pinned_to_a_known_leaking_baseline_is_refused_by_name(tmp_path):
+    # mutation: only scanning would still fetch it, and a future stubbed copy on that branch would
+    # pass under a name whose mainnet scores are known to be inflated
+    fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
+    mn = fake_mainnet()
+    with pytest.raises(BaselineError, match="gridflow"):
+        resolve_baseline("energy_arbitrage", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=mn,
+                         algorithm={"name": "gridflow", "id": "x", "adoption": 1})
+    assert fb.calls == []

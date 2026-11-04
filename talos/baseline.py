@@ -10,6 +10,7 @@ from talos import inside
 from talos import mainnet as _mainnet
 from talos.bench import EvalRequest
 from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF
+from talos.leak_check import KNOWN_LEAKING, describe, leak_findings
 from talos.state import BaselineRecord, _atomic_write
 from talos.types import NonceResult, NonceSet
 
@@ -63,6 +64,13 @@ def _require_scoreable(challenge: str, fuel: int, label: str, nonce_sets: list[N
                 f"errors {kinds}")
 
 
+def _require_leak_free(challenge: str, name: str, files: dict[str, str]) -> None:
+    """Checked on the files themselves: the branch they come from can move after job start."""
+    findings = leak_findings(challenge, files)
+    if findings:
+        raise BaselineError(f"baseline {name} carries the hidden_seed leak: {describe(findings)}")
+
+
 def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[NonceSet],
                      fuel: int, bench, cache_dir: Path, hardware_class: str, rule,
                      mainnet=_mainnet, log=lambda msg: None, algorithm: dict | None = None,
@@ -74,8 +82,11 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     else:
         top = mainnet.top_algorithm(challenge)
         if top is None:
-            raise BaselineError(f"no adopted, compiled algorithm found on mainnet for {challenge}")
+            raise BaselineError(f"no adopted, compiled, leak-free algorithm found on mainnet for "
+                                f"{challenge}")
         name, _algorithm_id, adoption = top
+    if name in KNOWN_LEAKING.get(challenge, ()):
+        raise BaselineError(f"baseline {name} carries the hidden_seed leak; start a new job")
     template = mainnet.fetch_template(challenge)
     key = cache_key(challenge, MONOREPO_REF, name, training, holdout, fuel, hardware_class,
                     hyperparameters)
@@ -86,9 +97,11 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             log(f"baseline {name}: cache file {cache_file} is corrupt; re-measuring")
         else:
+            _require_leak_free(challenge, name, rec.files)
             log(f"baseline {name}: cache hit {key}")
             return rec, template
     files = mainnet.fetch_algorithm_files(challenge, name)
+    _require_leak_free(challenge, name, files)
     # mainnet adoption is a fixed-point fraction of the challenge's benchmarker usage, 10**18 = 100%
     log(f"baseline {name} (adoption {adoption / 10**18:.2%}): "
         f"compiling and scoring {len(files)} file(s)")

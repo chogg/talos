@@ -45,6 +45,7 @@ With no jobs, `jobs` is `[]`.
 | `jobs[].llm_unpriced_reason` | string or null | why LLM spend is not measured |
 | `jobs[].compute_usd` | float or null | estimated compute spend so far |
 | `jobs[].last_event_ts` | float or null | time of the last readable `timeline.jsonl` event |
+| `jobs[].void_reason` | string or null | why the job's scores are void (the energy_arbitrage `hidden_seed` leak); null when they are not, or the job could not be read |
 | `jobs[].error` | string or null | why the job could not be read; null unless `status` is `unreadable` |
 
 Statuses: `queued`, `measuring_baseline`, `researching`, `confirming`, `paused`, `won`,
@@ -58,6 +59,7 @@ Talos writes no lock file, so compare `last_event_ts` with the current time.
 | `schema_version` | int | `1` |
 | `job_id` | string | the directory name under `runs/` |
 | `job` | object | the job's settings from `job.json` (`JobSpec.redacted()`: without the nonce seed). Its fields follow `JobSpec` in `talos/state.py` and are outside this versioned contract |
+| `void_reason` | string or null | why the job's scores are void (the energy_arbitrage `hidden_seed` leak); null when they are not |
 | `status` | string | the job status |
 | `stop_reason` | string or null | why the job stopped, e.g. `budget exhausted: iterations` |
 | `iteration` | int | the highest iteration started |
@@ -111,7 +113,8 @@ Talos writes no lock file, so compare `last_event_ts` with the current time.
 | `parent_label` | string | `baseline`, `template`, `base` or `#N` |
 | `chain` | int | its annealing chain; `0` for a greedy job |
 | `kind` | string | `best`, `false_positive`, `demoted`, `improved`, `accepted`, `rejected` or `failed` |
-| `outcome` | string | the loop's outcome, e.g. `improved`, `failed:score`, `failed:compile` |
+| `void_reason` | string or null | why the job's scores are void (the energy_arbitrage `hidden_seed` leak); null when they are not |
+| `outcome` | string | the loop's outcome, e.g. `improved`, `failed:score`, `failed:compile`, `failed:leak` |
 | `error` | string or null | the error text for a failed iteration |
 | `hypothesis` | object | what the LLM proposed |
 | `hypothesis.title` | string | its title |

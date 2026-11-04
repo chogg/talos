@@ -176,6 +176,10 @@ What counts:
 - An `exhausted` job still has a package, but its best candidate has not passed held-out. If its
   held-out status is `false_positive`, it beat the baseline on training and lost on held-out
   nonces: tell the user it is not a candidate to submit.
+- A job with `void_reason` set (the `energy_arbitrage` `hidden_seed` leak) has no result: its package
+  has no submission and it cannot be resumed. Tell the user to start a new job.
+- Compare `energy_arbitrage` scores only with algorithms rebuilt at the same pin on the same nonces,
+  never with mainnet scores.
 - Look at the worst track as well as the mean. A positive mean with a negative worst track helps
   one track at another's expense.
 

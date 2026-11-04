@@ -23,8 +23,8 @@ from pathlib import Path
 
 from talos import __version__, extras, image_updates, workspace
 from talos import mainnet as mainnet_api
-from talos.base_algorithm import (read_algorithm_dir, read_base_root, root_problem,
-                                  write_base_root)
+from talos.base_algorithm import (job_void_reason, read_algorithm_dir, read_base_root,
+                                  root_problem, write_base_root)
 from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
                           exhausted)
 from talos.extend import ADD_FLAGS, BUDGET_FLAGS, ExtensionRefused, extend
@@ -40,6 +40,7 @@ from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.deploy_digest import marker_name
 from talos.diagnostics import first_error
+from talos.leak_check import KNOWN_LEAKING
 from talos.lineage import AnnealSettings
 from talos.local_transport import (DockerInfo, DockerTransport, docker_info, has_gpu_runtime,
                                    prepare)
@@ -354,6 +355,9 @@ def _load_base(args, api, challenge: str) -> tuple[dict, dict[str, str]]:
             raise ConfigError(f"no .rs/.cu files under {d}")
         algorithm = {"source": "local", "name": d.resolve().name, "id": None}
     else:
+        if args.base_algorithm in KNOWN_LEAKING.get(challenge, ()):
+            raise ConfigError(f"{args.base_algorithm} carries the hidden_seed leak, so it cannot "
+                              "be a base algorithm; use --base-dir with a copy that removes it")
         found = api.find_algorithm(challenge, args.base_algorithm)
         if found is None:
             raise ConfigError(f"no compiled algorithm {args.base_algorithm!r} on mainnet for "
@@ -578,6 +582,7 @@ OUTCOME_TEXT = {
     "failed:score": "no improvement",
     "failed:edit": "no candidate: edit failed",
     "failed:compile": "no candidate: did not compile",
+    "failed:leak": "no candidate: broke the causality rule",
     "failed:dead_code": "no candidate: new code never called",
     "failed:runtime": "rejected: error rate over the ceiling",
     "failed:validation": "rejected: failed metered validation",
@@ -643,6 +648,8 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = f"edit rejected: {len(data['paths'])} path(s) outside the algorithm files"
     elif kind == "dead_code":
         text = "new code never called: " + ", ".join(data["names"])
+    elif kind == "leak_rejected":
+        text = "causality rule broken: " + data["problem"]
     elif kind == "iteration_done":
         text = OUTCOME_TEXT.get(data["outcome"], data["outcome"])
         if data["outcome"] == "improved":
@@ -732,6 +739,10 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
                   f"(monorepo {spec.monorepo_ref}, dev image {spec.dev_image_tag or 'unknown'}); "
                   f"start a new job with dev image {DEV_IMAGE_TAG} to remeasure the baseline "
                   "and candidates together", file=sys.stderr)
+            return 2
+        void = job_void_reason(spec, state, store.run_dir)
+        if void:
+            print(f"job {spec.job_id} is void: {void}; start a new job", file=sys.stderr)
             return 2
         cu_path = _template_cu_path(spec, store)
         if cu_path is not None and not cu_path.is_file():
@@ -993,6 +1004,9 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
            "mainnet's top algorithm, as a score to beat"] if base else []),
         *(["             its source goes to your LLM provider and compute backend"]
           if base and base["source"] == "local" else []),
+        *([f"  baseline:  never {', '.join(sorted(KNOWN_LEAKING[challenge]))} (hidden_seed leak); "
+           "compare only with algorithms rebuilt at the pin, never with mainnet scores"]
+          if challenge in KNOWN_LEAKING else []),
         f"  {hp_line}",
         f"  budget:    {budget_text}",
         f"  backend:   {backend} - {billing}" if cfg.provider != "fake" else

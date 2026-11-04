@@ -18,7 +18,7 @@ from pathlib import Path
 
 from talos.package import _diff
 from talos.state import JobSpec, JobState, JobStore
-from talos.base_algorithm import ROOT_DIR, read_base_root, root_label
+from talos.base_algorithm import ROOT_DIR, job_void_reason, read_base_root, root_label
 from talos.template_start import read_template_root, root_names
 
 KINDS = ("best", "false_positive", "demoted", "improved", "accepted", "rejected", "failed")
@@ -585,10 +585,13 @@ def _node_json(nodes: list[ReportNode], diffs: dict[int, str]) -> str:
 
 
 def render_report(spec: JobSpec, state: JobState, timeline: list[dict],
-                  sources: Sources) -> str:
+                  sources: Sources, void: str | None = None) -> str:
     """The whole report.html. Pure: no I/O, no clock, no randomness."""
     holdout = holdout_points(timeline)
     parts = [_header(spec, state, timeline, holdout)]
+    if void:
+        parts.append(f'<p class="none"><strong>Void: {_esc(void)}.</strong> Nothing in this report '
+                     "counts as a result.</p>")
     nodes: list[ReportNode] = []
     if state.baseline is None:
         parts.append('<p class="none">No baseline was measured, so there is nothing else to '
@@ -876,7 +879,8 @@ def write_report(store: JobStore, spec: JobSpec | None = None,
     spec = spec if spec is not None else store.read_spec()
     state = state if state is not None else store.load()
     text = render_report(spec, state, read_timeline(store.run_dir / "timeline.jsonl"),
-                         run_sources(store.run_dir, spec, state))
+                         run_sources(store.run_dir, spec, state),
+                         void=job_void_reason(spec, state, store.run_dir))
     pkg = store.run_dir / "package"
     pkg.mkdir(exist_ok=True)
     path = pkg / "report.html"

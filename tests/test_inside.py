@@ -694,3 +694,65 @@ def test_closing_the_pool_stream_early_kills_the_solvers_it_started(tmp_path, mo
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+FIXED_CHALLENGE = """\
+#[derive(Serialize, Clone)]
+pub struct Challenge {
+    pub seed: [u8; 32],
+    #[serde(skip_serializing)]
+    hidden_seed: [u8; 32],
+    pub num_steps: usize,
+}
+"""
+# tig-challenges/src/energy_arbitrage/mod.rs before commit 2703c9af.
+LEAKING_CHALLENGE = """\
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Challenge {
+    pub seed: [u8; 32],
+    hidden_seed: [u8; 32],
+    pub num_steps: usize,
+}
+"""
+
+
+def _energy_monorepo(tmp_path, source):
+    path = tmp_path / "tig-challenges" / "src" / "energy_arbitrage"
+    path.mkdir(parents=True)
+    if source is not None:
+        (path / "mod.rs").write_text(source)
+    return tmp_path
+
+
+def test_challenge_problem_passes_only_the_fixed_source(tmp_path):
+    # mutation: the fix being a comment in challenges.py, as it was, lets a wrong checkout score
+    fixed = _energy_monorepo(tmp_path / "a", FIXED_CHALLENGE)
+    assert inside.challenge_problem("energy_arbitrage", fixed) is None
+    assert inside.challenge_problem("energy_arbitrage",
+                                    _energy_monorepo(tmp_path / "b", LEAKING_CHALLENGE))
+    assert inside.challenge_problem("knapsack", tmp_path) is None
+
+
+@pytest.mark.parametrize("source", [
+    FIXED_CHALLENGE.replace("    #[serde(skip_serializing)]\n", ""),
+    FIXED_CHALLENGE.replace("hidden_seed:", "pub hidden_seed:").replace(
+        "#[serde(skip_serializing)]\n    pub", "#[serde(skip_serializing)]\n    pub"),
+    FIXED_CHALLENGE.replace("Serialize, Clone", "Serialize, Debug, Clone"),
+    FIXED_CHALLENGE.replace("Serialize, Clone", "Serialize, Deserialize, Clone"),
+    "pub struct Other {}\n",
+    None,
+], ids=["serialised", "public", "debug", "deserialize", "no_struct", "no_file"])
+def test_challenge_problem_refuses_each_way_the_seed_can_be_exposed(tmp_path, source):
+    # mutation: dropping any one test of the source lets that form through
+    assert "2703c9af" in inside.challenge_problem("energy_arbitrage",
+                                                  _energy_monorepo(tmp_path, source))
+
+
+@pytest.mark.parametrize("build", [inside.build, inside.build_native], ids=["metered", "native"])
+def test_a_build_of_the_leaking_challenge_never_starts(tmp_path, build):
+    # mutation: checking only the metered build lets native research score against the old code
+    def run(*a, **kw):
+        pytest.fail("must not build")
+    ok, out = build(_energy_monorepo(tmp_path, LEAKING_CHALLENGE), "energy_arbitrage", "algo",
+                    run=run)
+    assert not ok and "2703c9af" in out

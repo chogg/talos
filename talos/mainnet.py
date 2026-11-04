@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from statistics import mean
 
 from talos.challenges import MONOREPO_REF, TEMPLATE_START_FILES
+from talos.leak_check import KNOWN_LEAKING, leak_findings
 
 MAINNET_API = "https://mainnet-api.tig.foundation"
 GH_REPO = "tig-foundation/tig-monorepo"
@@ -112,14 +113,20 @@ def _compiled_algorithms(name: str, get_json) -> list[tuple[str, str, int]]:
     return out
 
 
-def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
-    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm, or
-    None."""
-    best: tuple[str, str, int] | None = None
-    for found in _compiled_algorithms(name, get_json):
-        if found[2] > 0 and (best is None or found[2] > best[2]):
-            best = found
-    return best
+def top_algorithm(name: str, get_json=_get_json, get_text=_get_text
+                  ) -> tuple[str, str, int] | None:
+    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm free of
+    a price leak (talos/leak_check.py), or None. A challenge with no leak rules fetches nothing;
+    on one with rules, a fetch that fails raises rather than choosing an algorithm unread."""
+    leaking = KNOWN_LEAKING.get(name)
+    adopted = [found for found in _compiled_algorithms(name, get_json) if found[2] > 0]
+    for found in sorted(adopted, key=lambda f: -f[2]):  # stable: the first listed wins a tie
+        if leaking is None:
+            return found
+        if found[0] not in leaking and not leak_findings(
+                name, fetch_algorithm_files(name, found[0], get_text, get_json)):
+            return found
+    return None
 
 
 def find_algorithm(name: str, algorithm: str, get_json=_get_json) -> tuple[str, str, int] | None:

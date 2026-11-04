@@ -112,7 +112,29 @@ def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
 BUILD_OUTPUT_CAP = 1_000_000
 
 
+def challenge_problem(challenge: str, monorepo: Path) -> str | None:
+    """Why this checkout's challenge still leaks its hidden seed, or None. The derive compiles into
+    the algorithm's .so from this source, so this file is the code a score depends on, whatever
+    the pin says it is."""
+    if challenge != "energy_arbitrage":
+        return None
+    path = Path(monorepo) / "tig-challenges" / "src" / challenge / "mod.rs"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"cannot check {path} for TIG's hidden_seed fix (2703c9af): {e}"
+    derive = re.search(r"#\[derive\(([^)]*)\)\]\s*pub struct Challenge\b", source)
+    if derive is None or re.search(r"\b(?:Debug|Deserialize)\b", derive.group(1)):
+        return f"{path} predates TIG's hidden_seed fix (2703c9af): Challenge can expose it"
+    if not re.search(r"#\[serde\(skip_serializing\)\]\s*hidden_seed\s*:", source):
+        return f"{path} predates TIG's hidden_seed fix (2703c9af): hidden_seed is not private"
+    return None
+
+
 def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tuple[bool, str]:
+    problem = challenge_problem(challenge, monorepo)
+    if problem:
+        return False, problem
     r = run(["build_algorithm", name], cwd=monorepo, capture_output=True, text=True,
             encoding="utf-8", errors="replace")
     out = (r.stdout or "") + (r.stderr or "")
@@ -162,6 +184,9 @@ def build_native(monorepo: Path, challenge: str, name: str,
                  run=subprocess.run) -> tuple[bool, str]:
     """Stage the talos-native runner, build the unmetered PTX for a GPU challenge, then
     `cargo build` the runner. The algorithm must already be staged (stage_algorithm)."""
+    problem = challenge_problem(challenge, monorepo)
+    if problem:
+        return False, problem
     is_gpu = CHALLENGES[challenge].is_gpu
     native_runner.stage(monorepo, challenge, name, is_gpu)
     out = ""

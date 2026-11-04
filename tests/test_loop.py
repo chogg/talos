@@ -2415,3 +2415,70 @@ def test_focused_scored_event_has_the_focus_track_se_only(tmp_path):
                                track="t")
     loop.run()
     assert set(_scored_events(store)[0]["track_rel_se"]) == {"t"}
+
+
+def _energy(loop):
+    """The loop's job, on the challenge the leak rules apply to."""
+    loop.spec = replace(loop.spec, challenge="energy_arbitrage")
+    return loop
+
+
+def _with(code, frm=1, k=5):
+    return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {k}; {code}\n>>>>>>> REPLACE\n"
+
+
+ONE_ITERATION = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+
+
+@pytest.mark.parametrize("code, why", [
+    ("let v = serde_json::to_value(challenge);", "serialises"),
+    ("let a = std::env::args();", "process"),
+    ("solution.schedule = rewritten;", "rewrites the schedule"),
+], ids=["leak", "argv", "hindsight"])
+def test_a_candidate_breaking_the_causality_rule_never_reaches_the_bench(tmp_path, code, why):
+    # mutation: checking after the bench pays to score it, and could promote it to best
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), _with(code)], budget=ONE_ITERATION)
+    st = _energy(loop).run()
+    assert st.best is None and fb.calls == [] and st.spend.compute_usd == 0
+    assert st.hypotheses[0]["outcome"] == "failed:leak" and why in st.hypotheses[0]["error"]
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    assert [e for e in events if e["kind"] == "leak_rejected"]
+
+
+def test_the_rule_and_the_rejection_reach_the_next_hypothesis_prompt(tmp_path):
+    # mutation: not recording the reason has the LLM repeat the same idea blind
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), _with("let h = hidden_seed;"), hyp("b"),
+                                          edit(5)],
+                               budget=Budget(usd=None, hours=None, iterations=2, compute_usd=None),
+                               thresholds=Thresholds(recall=1, distill=99, reset=99))
+    st = _energy(loop).run()
+    assert st.hypotheses[0]["outcome"] == "failed:leak"
+    assert "reads hidden_seed" in fp.calls[2][1]
+    assert "Causality rule" in fp.calls[2][0]
+
+
+def test_a_compile_fix_cannot_introduce_the_leak(tmp_path):
+    # mutation: checking only the first edit lets the fix round carry it to the bench
+    fix = _with("let v = serde_json::to_value(challenge);", frm="BUG")
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), _with("", k="BUG"), fix], budget=ONE_ITERATION)
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    st = _energy(loop).run()
+    assert st.hypotheses[0]["outcome"] == "failed:leak"
+    assert len(fb.calls) == 1  # the broken edit only
+
+
+def test_inherited_schedule_writes_do_not_fail_a_candidate(tmp_path):
+    # mutation: measuring hindsight without the parent refuses every candidate of peakshift
+    site = "solution.schedule = rewritten;"
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=ONE_ITERATION)
+    loop.state.baseline.files = {"mod.rs": f"fn solve() {{ let k = 1;\n{site} }}\n"}
+    st = _energy(loop).run()
+    assert st.hypotheses[0]["outcome"] != "failed:leak" and len(fb.calls) >= 1
+
+
+def test_the_rules_do_not_touch_other_challenges(tmp_path):
+    # mutation: an unscoped check fails a knapsack candidate over code the rule says nothing about
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), _with("let v = serde_json::to_value(x);")],
+                               budget=ONE_ITERATION)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] != "failed:leak" and len(fb.calls) >= 1
